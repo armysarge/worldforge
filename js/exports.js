@@ -255,6 +255,7 @@ async function exportMasks() {
     ['Rocks', i => S.land[i] ? clamp(sstep(20, 38, slope[i]) + (biome[i] === 5 ? .6 : biome[i] === 4 ? .3 : biome[i] === 6 ? .3 : 0), 0, 1) : 0, r],
     ['Cliffs', i => S.land[i] ? sstep(32, 45, slope[i]) : 0, r],
     ['Scree', i => scree[i], r],
+    ['Floodplain', i => S.floodM ? S.floodM[i] : 0, r],
     ['Wetness', wet, r],
     ['AlienStage', i => stageT[i] / 3, r],
     // resource masks (0..1 density) for PCG scatter: trees by wood type, rocks/boulders, ore outcrops, forage, herbs, game, fish
@@ -462,7 +463,7 @@ function worldData() {
       oreRarity: ['stone', 'iron', 'copper', 'silver', 'gold', 'titanium', 'diamond', 'uranium'],
       deposits: S.deposits.map(p => ({ id: p.id, kind: p.type, name: p.name, rarity: p.rarity || null, rarityLabel: p.rarityLabel || null, pos: m(p.x, p.y), radiusM: p.radiusM, richness: p.richness, depth: p.depth })),
       note: 'Area resources are the Res_* PCG masks (0..1 density). Deposit/point resources are POIs with a resources list.' },
-    pois: S.pois.map(p => ({ id: p.id, resources: p.resources || [], zone: ['', 'early', 'mid', 'late'][p.zone], danger: p.danger, lootTier: p.loot, type: p.start ? 'start_town' : p.type, name: p.name, pos: m(p.x, p.y), height: Math.round(p.h), ...(p.access ? { roadAccess: p.access } : {}), ...(p.strength ? { seedStrength: p.strength } : {}) })),
+    pois: S.pois.map(p => ({ id: p.id, resources: p.resources || [], zone: ['', 'early', 'mid', 'late'][p.zone], danger: p.danger, lootTier: p.loot, type: p.start ? 'start_town' : p.type, name: p.name, pos: m(p.x, p.y), height: Math.round(p.h), ...(p.access ? { roadAccess: p.access } : {}), ...(p.strength ? { seedStrength: p.strength } : {}), ...(p.dropM ? { dropM: p.dropM, riverWidthM: p.riverWidthM } : {}) })),
     lakes: S.lakes.map(l => ({ name: l.name, reservoir: !!l.reservoir, pos: m(l.x, l.y), areaKm2: +l.area.toFixed(3), waterLevel: +l.level.toFixed(1), maxDepth: +l.depth.toFixed(1) })),
     riverOutlets: S.rivers.filter(p => p.exitsMap).map(p => {
       const [x, y, , z] = p.at(-1);

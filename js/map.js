@@ -31,7 +31,7 @@ Object.assign(POI_STYLE, {
   tunnel: ['U', '#4b5563', '#fff', 5], excavation: ['X', '#d946ef', '#fff', 6.5], power: ['⚡', '#facc15', '#111', 6], substation: ['⚡', '#fef08a', '#111', 4],
   water: ['w', '#38bdf8', '#111', 5], lighthouse: ['L', '#fef3c7', '#111', 6], shipwreck: ['~', '#94a3b8', '#111', 5], dock: ['d', '#7dd3fc', '#111', 4.5],
   beach: ['b', '#fde68a', '#111', 4.5], bunker: ['■', '#78716c', '#fff', 5], lookout: ['l', '#fb923c', '#111', 5], comms: ['Y', '#f59e0b', '#111', 5],
-  ranger: ['N', '#15803d', '#fff', 5], campsite: ['Δ', '#84cc16', '#111', 5], cave: ['∩', '#44403c', '#fff', 5], logging: ['k', '#92400e', '#fff', 5],
+  ranger: ['N', '#15803d', '#fff', 5], campsite: ['Δ', '#84cc16', '#111', 5], cave: ['∩', '#44403c', '#fff', 5], waterfall: ['≋', '#38bdf8', '#111', 5], logging: ['k', '#92400e', '#fff', 5],
   hut: ['h', '#e7e5e4', '#111', 5], crash: ['✕', '#f87171', '#111', 5.5], checkpoint: ['!', '#dc2626', '#fff', 5], motel: ['z', '#c4b5fd', '#111', 4.5],
   windfarm: ['✣', '#f1f5f9', '#111', 5.5], raiders: ['☠', '#7f1d1d', '#fff', 6], secret: ['?', '#111', '#e879f9', 7], weather: ['☂', '#bae6fd', '#111', 5],
   nest: ['✺', '#a21caf', '#fff', 5.5], sporefield: [':', '#c084fc', '#111', 4.5]
@@ -492,6 +492,7 @@ function realityText() {
     `  ${ok(!r.uphill)} river beds rising downstream: ${r.uphill}\n` +
     `  ${ok(!r.undrained)} land cells that can't drain (final terrain): ${r.undrained}\n` +
     `  ${ok(!r.badEnd)} rivers without a valid outlet: ${r.badEnd}\n` +
+    `  ${ok(true)} river landforms: ${r.deltas || 0} deltas, ${(r.floodplainKm2 || 0).toFixed(1)} km² floodplain, ${r.waterfalls || 0} waterfalls\n` +
     (S.mainland ? `  Rivers continuing off the map: ${S.rivers.filter(p => p.exitsMap).length}\n` : '') +
     `  ${ok(!r.wetB)} buildings in water: ${r.wetB}\n` +
     `  ${ok(!r.lowB)} homes below 1.5 m (flood risk): ${r.lowB}\n` +

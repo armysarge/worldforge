@@ -45,6 +45,7 @@
   <label title="Controls how deeply drainage channels erode before the river beds are carved."><span>Erosion</span><input id="erosion" type="range" min="0" max="1" step=".01" value=".3"></label>
   <label title="Raises or lowers the elevation where the snow biome and snow material begin."><span>Snow line</span><input id="snowLine" type="range" min="0" max="1" step=".01" value=".8"></label>
   <label title="Controls the spacing of terrain features. Higher values place details closer together."><span>Terrain scale</span><input id="terrainScale" type="range" min=".005" max=".03" step=".001" value=".01"></label>
+  <label title="Deltas where large rivers meet the sea, and flat floodplains along lowland rivers. Turn off to reproduce maps made before river landforms."><span>River landforms</span><select id="landforms"><option value="on">On (deltas, floodplains)</option><option value="off">Off</option></select></label>
   <button class="go" id="gen" title="Generate a world with the current settings. This clears manual POI moves.">Generate terrain</button>
   <button id="cancelGen" hidden title="Stop the generation in progress. The previous world stays on screen.">Cancel</button>
   </div></details>

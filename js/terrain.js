@@ -14,7 +14,7 @@ const SLICE_M = 2000, DEV_M = 1225;         // docs: vertical slice ~4 km², fir
 
 // Settings that drive generation. Read from the form on the main thread; buildWorld itself never touches the DOM,
 // so it can run in a Web Worker (js/worker.js).
-const GEN_SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale'];
+const GEN_SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms'];
 const readGenSettings = () => Object.fromEntries(GEN_SETTING_IDS.map(id => [id, $(id).value]));
 // river width/depth from catchment: plain functions can't cross the worker boundary, so they are rebuilt from riverT and ez
 function attachRiverFns(world) {
@@ -43,7 +43,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   };
   const frequency = terrainSettings.scale * 100, elevation = .4 + 1.2 * terrainSettings.elevation;
   const snowM = (300 + 2000 * terrainSettings.snowLine) * ez;
-  const useGPU = val('compute') === 'auto';
+  const useGPU = val('compute') === 'auto', landforms = val('landforms') !== 'off';   // landforms: deltas + floodplains (reshape terrain)
   const stageTimes = []; let stageName = null, stageStart = performance.now();            // seconds spent in each generation stage
   const lapStage = () => { const now = performance.now(); if (stageName) stageTimes.push([stageName, (now - stageStart) / 1000]); stageStart = now; };
   const status = m => { lapStage(); stageName = m.replace(/…$/, ''); return Promise.resolve(onStatus(m)).then(() => new Promise(r => setTimeout(r))); };   // onStatus may throw GenerationCancelled
@@ -228,8 +228,55 @@ async function buildWorld(settings, onStatus = () => {}) {
     }
     p.end = endCell; rivers.push(p);
   }
+  // river landforms (optional, they reshape terrain): distributary deltas where a major river meets the sea on a low
+  // coastal plain, then flat floodplains along gently falling lowland reaches. Both run before the channels are carved.
+  const floodM = new Uint8Array(N2); let deltaCount = 0, floodCells = 0;
+  if (landforms) {
+    for (const p of rivers.slice()) {
+      const L = p.length, mouth = p[L - 1]; if (L < 8 || p.exitsMap || !ocean[p.end] || mouth[2] < 35 * T) continue;
+      const reach = clamp(widthOf(mouth[2]) * 25, Math.max(600, 6 * cell), 3000) / cell;     // apex distance from the mouth, cells
+      let k = L - 1; while (k > 0 && Math.hypot(p[k][0] - mouth[0], p[k][1] - mouth[1]) < reach) k--;
+      const apex = p[k], ax = Math.round(apex[0]), ay = Math.round(apex[1]); if (k >= L - 3 || h[ay * n + ax] > 25 * ez) continue;   // deltas need a low plain
+      const dx = mouth[0] - apex[0], dy = mouth[1] - apex[1], len = Math.hypot(dx, dy) || 1, ux = dx / len, uy = dy / len, a = mouth[2] * .3;
+      let made = 0;
+      for (const turn of [-.55, .55]) {                                 // one distributary ~30° to each side of the main channel
+        const c = Math.cos(turn), sn = Math.sin(turn), vx = ux * c - uy * sn, vy = ux * sn + uy * c, pts = [];
+        let endCell = -1;
+        for (let t = 0; t <= reach * 2.2; t += .5) {
+          const bend = Math.sin(Math.min(1, t / (reach * 2)) * Math.PI) * reach * .15 * Math.sign(turn);   // gentle outward bow
+          const x = apex[0] + vx * t - vy * bend, y = apex[1] + vy * t + vx * bend, xi = Math.round(x), yi = Math.round(y);
+          if (xi < 1 || yi < 1 || xi >= n - 1 || yi >= n - 1) break;
+          const i = yi * n + xi; pts.push([x, y]);
+          if (ocean[i]) { endCell = i; break; }
+          if (lakeId[i] || h[i] > apex[3] + Math.max(3, 8 * ez)) break;   // stays on low ground
+        }
+        if (endCell < 0 || pts.length < 4) continue;
+        let bed = apex[3];                                               // falls from the apex bed to just below sea level, never above the ground
+        const q = pts.map(([x, y], j) => { const i = Math.round(y) * n + Math.round(x); bed = Math.min(bed, lerp(apex[3], -1, j / (pts.length - 1)), ocean[i] ? -1 : h[i] - .5); return [x, y, a, Math.max(-3, bed), i]; });
+        q.end = endCell; q.distributary = true; rivers.push(q); made++;
+      }
+      if (made) deltaCount++;
+    }
+    for (const p of rivers) for (let j = 0; j < p.length - 1; j++) {
+      const [x0, y0, a, b0] = p[j], [x1, y1, , b1] = p[j + 1]; if (a < 6 * T) continue;
+      if ((b0 - b1) / ((Math.hypot(x1 - x0, y1 - y0) || 1) * cell) > .02) continue;        // lowland reaches only (under 2% fall)
+      const W = clamp(widthOf(a) * 15, 3 * cell, 1500) / cell, Wc = Math.ceil(W), sx = x1 - x0, sy = y1 - y0, wall = Math.max(8, 20 * ez);
+      for (let y = Math.max(0, Math.floor(Math.min(y0, y1) - Wc)); y <= Math.min(n - 1, Math.ceil(Math.max(y0, y1) + Wc)); y++)
+        for (let x = Math.max(0, Math.floor(Math.min(x0, x1) - Wc)); x <= Math.min(n - 1, Math.ceil(Math.max(x0, x1) + Wc)); x++) {
+          const i = y * n + x; if (ocean[i] || lakeId[i]) continue;
+          const t = clamp(((x - x0) * sx + (y - y0) * sy) / (sx * sx + sy * sy || 1), 0, 1), d = Math.hypot(x - x0 - t * sx, y - y0 - t * sy); if (d >= W) continue;
+          const target = Math.max(lerp(b0, b1, t) + 1.5 + 2 * d / W, rimL[i], .6);
+          if (h[i] <= target || h[i] > target + wall) continue;         // already low, or a valley wall / terrace: leave it
+          const nh = lerp(h[i], target, 1 - sstep(.6, 1, d / W));
+          if (nh < h[i]) { h[i] = nh; if (!floodM[i]) { floodM[i] = 1; floodCells++; } }
+        }
+    }
+  }
+  reality.deltas = deltaCount; reality.floodplainKm2 = floodCells * cellKm2;
   const chanM = new Uint8Array(N2);                               // the carved (meandered) channel: roads must bridge it, never fill it
   carveRivers(h, n, cell, rivers, 1, widthOf, depthOf, i => rimL[i], chanM, { openEdge: !!mainland });
+  if (landforms) for (let i = 0; i < N2; i++) if (chanM[i] && floodM[i]) { floodM[i] = 0; floodCells--; }   // the floodplain is the land beside the channel
+  reality.floodplainKm2 = floodCells * cellKm2;
   // channels follow the drainage so they never create a basin; fill any interpolation hollows they left
   { const r3 = priorityFlood(h, n); for (let i = 0; i < N2; i++) if (land[i] && r3.fl[i] > h[i]) { h[i] = r3.fl[i]; reality.pitsFilled++; } }
 
@@ -1324,6 +1371,32 @@ async function buildWorld(settings, onStatus = () => {}) {
     travel.singleAccess = pois.filter(p => ['city', 'town'].includes(p.type) && (deg[p.name] || 0) < 2).map(p => p.name);   // dead-end villages are normal
   }
 
+  // waterfalls: where a river channel drops steeply over a short run of the finished terrain. Named from their own random
+  // stream so adding them leaves every other placement unchanged.
+  {
+    const fallR = mulberry(hashSeed(seedStr + ':falls')), FALL_MIN = Math.max(6, 12 * ez), run = Math.max(1.5 * cell, 50), cands = [];
+    NAME.waterfall = () => cap(SYL[fallR() * SYL.length | 0] + SYL[fallR() * SYL.length | 0]) + ' Falls';
+    for (const p of rivers) {
+      if (p.distributary) continue;
+      const z = p.map(q => terrainAt(h, n, cell, q[0] * cell, q[1] * cell)), s = [0];
+      for (let j = 1; j < p.length; j++) s.push(s[j - 1] + Math.hypot(p[j][0] - p[j - 1][0], p[j][1] - p[j - 1][1]) * cell);
+      for (let j = 0, k = 0; j < p.length - 1; j++) {
+        if (p[j][2] < 2 * T) continue;
+        k = Math.max(k, j + 1); while (k + 1 < p.length && s[k + 1] - s[j] <= run) k++;
+        const drop = z[j] - z[k], horiz = s[k] - s[j];
+        if (drop >= FALL_MIN && drop / (horiz || 1) >= .6) { const m = (j + k) >> 1, i = Math.round(p[m][1]) * n + Math.round(p[m][0]); if (land[i]) cands.push({ i, drop, width: widthOf(p[j][2]) }); }
+      }
+    }
+    cands.sort((a, b) => b.drop - a.drop);
+    const spacing = Math.max(M(3000), 8 * cell), got = [];
+    for (const c of cands) {
+      if (got.length >= cnt(4 + 8 * sq)) break;
+      const x = c.i % n, y = c.i / n | 0; if (got.some(g => Math.hypot(g.x - x, g.y - y) * cell < spacing)) continue;
+      got.push(P('waterfall', c.i, { dropM: Math.round(c.drop), riverWidthM: +c.width.toFixed(1) }));
+    }
+    reality.waterfalls = got.length;
+  }
+
   // stats
   let landCells = 0, hmin = Infinity, hmax = -Infinity, rivCells = 0; const stageCnt = [0, 0, 0, 0], regCnt = [0, 0, 0, 0, 0, 0, 0];
   for (let i = 0; i < N2; i++) { if (land[i]) { landCells++; stageCnt[stageT[i]]++; regCnt[region[i]]++; } if (riv[i]) rivCells++; if (h[i] < hmin) hmin = h[i]; if (h[i] > hmax) hmax = h[i]; }
@@ -1335,7 +1408,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   for (const street of streets) { street.town = street.owner.id; delete street.owner; }
   for (const b of buildings) if (b.poi) { b.poiId = b.poi.id; delete b.poi; }
   const world = { ez, seed: seedStr, scenario, shape, mainland: !!mainland, terrainSettings, terrainBackend, terrainSeconds, sizeM, sc, n, k: Math.max(1, Math.round(2020 / n)), cell, h, ocean, lakeId, lakes, land, riv, acc, flow, rivers, riverW: widthOf, riverD: depthOf, riverT: T, hcache: {}, biome, moist, slope, shade, zone, region, stageT,
-    pois, roads, corridors, corW: M(1500), hmin, hmax, slice, urban, buildings, streets, menuCam, reality, travel, rimL, chanM, roadBedM, resStats, deposits,
+    pois, roads, corridors, corW: M(1500), hmin, hmax, slice, urban, buildings, streets, menuCam, reality, travel, rimL, chanM, floodM, roadBedM, resStats, deposits,
     res: Object.fromEntries(Object.entries(res).map(([k, a]) => [k, Uint8Array.from(a, v => Math.round(clamp(v, 0, 1) * 255))])),
     cstep: hmax > 1500 ? 50 : hmax > 600 ? 20 : 10,
     eco: { gw, eTer, eInf, eStage, eSeed },

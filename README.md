@@ -50,6 +50,15 @@ Choose a preset under **Terrain type → Mainland**. The terrain extends to the 
 
 **Elevation** scales vertical relief. **Erosion** controls how deeply catchment lines erode before river beds are carved. **Snow line** changes where snow appears in the biome and material layers. **Terrain scale** controls the size of terrain features. Higher values produce more closely spaced detail. The same seed and terrain controls work with **Satellite terrain**, **Topographic terrain**, and **Grayscale height** previews. Use the R16 or RAW export for full-precision engine height data. [Texturize Terrain Generator](https://texturize.app/generators/terrain)
 
+## River landforms
+
+**River landforms** (on by default) shapes the land along rivers:
+
+- **Floodplains**: flat valley floors beside gently falling lowland rivers, up to about 15 times the channel width. Valley walls and terraces are left alone. The **Floodplain** PCG mask marks them.
+- **Deltas**: where a major river reaches the sea across a low coastal plain, two distributary channels branch off towards the coast. Small islands often have no river large enough.
+
+Turn it **Off** to reproduce terrain made before this setting. **Waterfalls** are marked wherever a river drops steeply over a short distance; they are POIs with a drop height and do not change the terrain.
+
 ## Terrain compute
 
 **Auto** uses WebGPU for the base height field and small-scale terrain relief when the browser exposes a hardware adapter. The generator falls back to CPU when WebGPU is unavailable or the compute pass fails. The status line reports the backend and time spent on the base terrain pass. Drainage, rivers, roads, settlements and engine exports still run on the CPU.

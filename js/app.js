@@ -20,7 +20,7 @@ const ROADSIDE_POIS = new Set([
   'watertower', 'silo', 'farm', 'safehouse', 'industrial', 'harbor', 'dock', 'airport', 'airfield', 'airstrip',
   'military', 'research', 'mine', 'windfarm', 'logging', 'survivors'
 ]);
-const ANCHORED_POIS = new Set(['bridge', 'portal', 'viaduct', 'pass', 'dam', 'harbor', 'dock', 'rig', 'shipwreck', 'seastack', 'peak', 'spring', 'fishing', 'claypit']);
+const ANCHORED_POIS = new Set(['waterfall', 'bridge', 'portal', 'viaduct', 'pass', 'dam', 'harbor', 'dock', 'rig', 'shipwreck', 'seastack', 'peak', 'spring', 'fishing', 'claypit']);
 const poiEdits = [];
 function roadAccess(world, x, y, limit) {
   let result = null, closest = limit;
@@ -130,7 +130,7 @@ const LEGEND = [
   ['Industry & infrastructure', { industrial: 'Industrial', warehouse: 'Warehouse / depot', mine: 'Quarry', logging: 'Logging camp', power: 'Power station',
     substation: 'Substation', water: 'Water treatment', windfarm: 'Wind farm', dam: 'Reservoir dam', fuel: 'Fuel station', comms: 'Comms tower', radio: 'Radio mast' }],
   ['Coast', { harbor: 'Harbor', dock: 'Pier / dock', lighthouse: 'Lighthouse', beach: 'Beach', shipwreck: 'Shipwreck', bunker: 'Coastal bunker' }],
-  ['Wilderness', { cabin: 'Cabin', hut: 'Mountain hut', ranger: 'Ranger station', lookout: 'Fire lookout', campsite: 'Campground', cave: 'Cave', peak: 'Peak', weather: 'Weather station' }],
+  ['Wilderness', { cabin: 'Cabin', hut: 'Mountain hut', ranger: 'Ranger station', lookout: 'Fire lookout', campsite: 'Campground', cave: 'Cave', waterfall: 'Waterfall', peak: 'Peak', weather: 'Weather station' }],
   ['Military & science', { airport: 'Airport / airstrip', airfield: 'Military airfield', military: 'Military base', radar: 'Radar station', checkpoint: 'Checkpoint',
     crash: 'Crash site', research: 'Research lab', outpost: 'Research outpost', secret: 'Project Desolation site' }],
   ['People', { survivors: 'Survivor holdout', trader: 'Trading post', raiders: 'Raider camp' }],

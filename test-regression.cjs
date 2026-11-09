@@ -17,8 +17,14 @@ const channelRun = w => { let best = 0; for (const r of w.roads) { let run = 0; 
     assert(channelRun(w) <= 170, `${seed}: a road follows a river for ${Math.round(channelRun(w))} m`);
     assert(w.roads.every(rd => rd.path.length > 1 && rd.pts.every(p => p.every(Number.isFinite))), `${seed}: roads are finite polylines`);
     assert(w.h.every(Number.isFinite), `${seed}: finite heights`);
-    rows.push({ seed, shape, roads: w.roads.length, pois: w.pois.length, rivers: w.rivers.length, uphill: r.uphill || 0, 'river run m': Math.round(channelRun(w)), fingerprint: fingerprint(w) });
+    for (let i = 0; i < w.h.length; i++) if (w.floodM[i]) assert(w.land[i] && !w.chanM[i] && !w.lakeId[i], `${seed}: floodplain is land beside the channel`);
+    for (const f of w.pois.filter(p => p.type === 'waterfall')) assert(w.land[f.i] && f.dropM >= 6 && / Falls$/.test(f.name), `${seed}: waterfall ${f.name}`);
+    for (const rv of w.rivers.filter(rv => rv.distributary)) assert(w.ocean[rv.end], `${seed}: delta branches reach the sea`);
+    rows.push({ seed, shape, roads: w.roads.length, pois: w.pois.length, rivers: w.rivers.length, deltas: r.deltas, 'flood km²': +r.floodplainKm2.toFixed(1), falls: r.waterfalls, uphill: r.uphill || 0, 'river run m': Math.round(channelRun(w)), fingerprint: fingerprint(w) });
   }
+  const plain = await app.generate({ seed: 'r4', shape: 'coastal', landforms: 'off' });
+  assert(!plain.floodM.some(Boolean) && !plain.rivers.some(rv => rv.distributary), 'River landforms off adds no floodplain or delta');
+  app.set('landforms', 'on');
   const again = await app.generate({ seed: SEEDS[0][0], shape: SEEDS[0][1] });
   assert.equal(fingerprint(again), rows[0].fingerprint, 'regenerating a seed reproduces the identical world');
   console.table(rows); console.log(`Regression checks passed for ${SEEDS.length} seeds, determinism confirmed`);
