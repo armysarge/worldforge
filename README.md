@@ -1,5 +1,3 @@
-<img src="assets/worldforge.svg" alt="Worldforge topographic island logo" width="64" height="64">
-
 # Worldforge
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Donate-brightgreen?logo=buymeacoffee)](https://www.buymeacoffee.com/armysarge)
