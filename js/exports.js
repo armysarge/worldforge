@@ -237,12 +237,24 @@ async function exportMasks() {
   for (let Y = 0; Y < N; Y++) { const row = Math.round(Y * f) * n; for (let X = 0; X < N; X++) { const o = Y * N + X, gi = row + Math.round(X * f); E[o] = ocean[gi] || lakeId[gi] ? 255 : d[4 * o]; } }
   const m = new Float32Array(N * N), t = new Float32Array(N * N), o = new Float32Array(N * N);
   const aT = S.riverT / 8, wet = i => Math.max(biome[i] === 7 || biome[i] === 8 || !S.land[i] ? 1 : 0, clamp(Math.log2(1 + acc[i] / aT) / 10, 0, 1));
+  // scree: loose rock on moderate slopes just below a cliff, computed once on the generation grid
+  const scree = new Float32Array(n * n), R3 = 3;
+  for (let i = 0; i < n * n; i++) {
+    if (!S.land[i] || slope[i] > 38 || slope[i] < 12) continue;
+    const x = i % n, y = i / n | 0; let best = 0;
+    for (let dy = -R3; dy <= R3; dy++) for (let dx = -R3; dx <= R3; dx++) {
+      const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue; const j = yy * n + xx;
+      if (S.h[j] > S.h[i] && slope[j] > 40) best = Math.max(best, 1 - Math.hypot(dx, dy) / (R3 + 1));
+    }
+    scree[i] = best * sstep(12, 22, slope[i]);
+  }
   const MASKS = [
     ['Exclusion', null, 1],
     ['TreeDensity', i => biome[i] === 3 ? .55 + .45 * moist[i] : biome[i] === 2 ? .08 : biome[i] === 4 ? .15 : biome[i] === 7 ? .2 : 0, r],
     ['Grass', i => (biome[i] === 2 || biome[i] === 9 ? 1 : biome[i] === 7 ? .7 : biome[i] === 3 ? .45 : biome[i] === 4 ? .35 : 0) * (1 - sstep(30, 40, slope[i])), r],
     ['Rocks', i => S.land[i] ? clamp(sstep(20, 38, slope[i]) + (biome[i] === 5 ? .6 : biome[i] === 4 ? .3 : biome[i] === 6 ? .3 : 0), 0, 1) : 0, r],
     ['Cliffs', i => S.land[i] ? sstep(32, 45, slope[i]) : 0, r],
+    ['Scree', i => scree[i], r],
     ['Wetness', wet, r],
     ['AlienStage', i => stageT[i] / 3, r],
     // resource masks (0..1 density) for PCG scatter: trees by wood type, rocks/boulders, ore outcrops, forage, herbs, game, fish
@@ -256,7 +268,7 @@ async function exportMasks() {
     if (fn) for (let Y = 0; Y < N; Y++) { const row = Math.round(Y * f) * n; for (let X = 0; X < N; X++) m[Y * N + X] = fn(row + Math.round(X * f)); }
     else for (let i = 0; i < N * N; i++) m[i] = E[i] / 255;
     blur(m, N, br, t, o);
-    const keepOut = clearOut || name === 'TreeDensity' || name === 'Grass' || name === 'Rocks';      // scatter masks already respect the exclusion
+    const keepOut = clearOut || name === 'TreeDensity' || name === 'Grass' || name === 'Rocks' || name === 'Scree';      // scatter masks already respect the exclusion
     for (let i = 0; i < N * N; i++) { const v = (keepOut ? o[i] * (1 - E[i] / 255) : o[i]) * 255; d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = v; d[4 * i + 3] = 255; }
     x.putImageData(img, 0, 0); await new Promise(res => c.toBlob(b => { save(b, `${tag(N)}_pcg_${name}.png`); res(); }));
   }

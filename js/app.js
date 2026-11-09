@@ -110,7 +110,7 @@ function refreshPoiEdits() {
 $('gen').onclick = async () => {
   if ($('gen').disabled) return;
   $('gen').disabled = $('rnd').disabled = true;
-  try { await generate(); }
+  try { await generate(); syncHash(); }
   catch (e) { $('status').textContent = 'Error: ' + e.message; console.error(e); }
   finally { $('gen').disabled = $('rnd').disabled = false; }
 };
@@ -239,6 +239,8 @@ async function upgradeMaterialControls() {
 
 function startApp() {
   setZoom(1);
+  if (typeof location !== 'undefined') applySettings(settingsFromHash(location.hash));   // a shared link carries its own settings
+  refreshSaved();
   $('gen').click();
   upgradeMaterialControls();
 }

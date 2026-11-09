@@ -9,6 +9,9 @@
 <script defer src="js/terrain.js"></script>
 <script defer src="js/map.js"></script>
 <script defer src="js/exports.js"></script>
+<script defer src="js/geo.js"></script>
+<script defer src="js/mesh.js"></script>
+<script defer src="js/share.js"></script>
 <script defer src="js/app.js"></script>
 </head>
 <body>
@@ -41,6 +44,13 @@
   <button class="go" id="gen" title="Generate a world with the current settings. This clears manual POI moves.">Generate terrain</button>
   </div></details>
 
+  <details class="panel"><summary>Saved worlds</summary><div class="panel-body">
+  <label title="Name for the current seed and settings. Leave empty to label it by seed and terrain type."><span>Name</span><input type="text" id="saveName" placeholder="optional"></label>
+  <div class="row"><button id="saveWorld" title="Keep the current seed and settings in this browser.">Save current</button><button id="shareLink" title="Copy a link that recreates this world from its seed and settings.">Copy share link</button></div>
+  <label title="Worlds saved in this browser."><span>Saved</span><select id="savedList"></select></label>
+  <div class="row"><button id="loadSaved" title="Apply the saved settings and generate that world.">Load and generate</button><button id="deleteSaved" title="Remove the selected world from this browser.">Remove</button></div>
+  </div></details>
+
   <details class="panel" open><summary>Map layers</summary><div class="panel-body">
   <label title="Choose what the map colors represent. The legend changes with the mode."><span>Mode</span><select id="mode">
     <option value="terrain">Satellite terrain</option><option value="topographic">Topographic terrain</option><option value="height">Grayscale height</option><option value="biome">Biomes</option><option value="materials">Material weights</option><option value="regions">Regions</option>
@@ -71,6 +81,9 @@
   <div class="row"><button id="xLayers" title="Download one grayscale weightmap per terrain material.">Layer weightmaps</button><button id="xWater" title="Download the mask for mapped ocean and lakes.">Water mask</button></div>
   <div class="row"><button id="xSlice" title="Crop the 16-bit heightmap to the generated starting region.">Slice crop .r16</button><button id="xEco" title="Download the ecology grid, resource stock and infestation data.">EcologyGrid .json</button></div>
   <div class="row"><button id="xMap" title="Download the current map colors and overlays as an image.">Map .png</button><button id="xJson" title="Download world settings, locations and geometry as JSON.">World data .json</button></div>
+  <div class="row"><button id="xGeo" title="Download roads, bridges and tunnels, rivers, streets, lakes and POIs as GeoJSON vector data.">Vectors .geojson</button><button id="xNormal" title="Download a world-space normal map at the export size. Green points north; flip it for Unreal.">Normal map .png</button></div>
+  <label title="Vertices per side of the exported terrain mesh. Higher values make larger files."><span>Mesh size</span><select id="xMeshRes"><option value="257">257 (light)</option><option value="513" selected>513</option><option value="1025">1025 (detailed)</option><option value="2049">2049 (very large)</option></select></label>
+  <div class="row"><button id="xGlb" title="Download the terrain as a binary glTF mesh with normals.">Mesh .glb</button><button id="xObj" title="Download the terrain as a Wavefront OBJ mesh with normals.">Mesh .obj</button></div>
   </div></details>
 
   <details class="panel"><summary>Terrain tiles</summary><div class="panel-body">

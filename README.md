@@ -104,6 +104,23 @@ For a custom Godot terrain, decode the unsigned little-endian 16-bit samples wit
 
 [Terrain3D importer](https://terrain3d.readthedocs.io/en/stable/docs/import_export.html) · [Godot HeightMapShape3D](https://docs.godotengine.org/en/stable/classes/class_heightmapshape3d.html)
 
+## Other exports
+
+| Button | Output |
+| --- | --- |
+| **Vectors .geojson** | Roads (with elevation profile), bridges, viaducts, tunnels and overpasses as separate lines, rivers (bed elevation and width per vertex), streets, lakes and POIs. Coordinates are metres from the north-west corner, not geographic. |
+| **Mesh .glb / .obj** | The terrain as a triangle mesh with normals, at the selected **Mesh size**. x east, y up, z south, in metres. |
+| **Normal map .png** | World-space normal map at the export size. Green points north (OpenGL convention); flip green for Unreal. |
+| **PCG masks** | Now also includes **Scree**, loose rock on the slopes below cliffs. |
+
+## Saved worlds and links
+
+**Saved worlds** keeps seeds and their settings in this browser. **Copy share link** copies a URL that recreates the current world; the address bar also updates after each generation. Links reproduce maps exactly with **CPU** compute; WebGPU can differ slightly.
+
+## Tests
+
+Run the `test-*.cjs` scripts with Node. `test-regression.cjs` generates fixed seeds and checks drainage, river outlets, road access, roads staying off rivers and that a seed reproduces the same world.
+
 ## Terrain tiles
 
 Open **Terrain tiles**, choose Unreal or Unity, and pick a 2 × 2, 4 × 4, 8 × 8 or 16 × 16 grid. Turn on **Show tile grid and selection** and enter the column and row to locate a section. **Export selected tile** saves that section at the same resolution and position it would have in **Export all tiles**. Column 0 is west and row 0 is north.

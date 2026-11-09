@@ -992,6 +992,7 @@ async function generate() {
   function link(a, b, type, cst = cost, extra = {}) {
     if (a === b || linked.has(lkey(a, b))) return; linked.add(lkey(a, b));
     const rt = routeAvoidingChannel(a.i, b.i, type, cst); if (!rt) return false; const path = rt.path; extra = { ...extra, jd: rt.jd };
+    if (path.length < 2) { reached.add(a); reached.add(b); return true; }      // two sites in the same cell need no road
     let len = 0; for (let j = 1; j < path.length; j++) { const d = Math.abs(path[j] - path[j - 1]); len += (d === 1 || d === n ? 1 : 1.4142) * cell; }
     roads.push({ type, path, pts: smooth(path), a: a.name, b: b.name, len, ...extra }); reached.add(a); reached.add(b);
     for (const j of path) { cost[j] = Math.min(cost[j], base[j] * F_ROAD[type]); roadCell[j] = 1; }
