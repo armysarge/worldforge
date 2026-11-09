@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Worldforge Terrain Generator</title>
+<link rel="icon" href="assets/worldforge.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<script defer src="js/terrain.js"></script>
+<script defer src="js/map.js"></script>
+<script defer src="js/exports.js"></script>
+<script defer src="js/app.js"></script>
+</head>
+<body>
+<header class="app-bar">
+  <img class="brand-mark" src="assets/worldforge.svg" width="42" height="42" alt="">
+  <div><h1>Worldforge</h1><p>Terrain and worldbuilding for game engines</p></div>
+</header>
+<div class="workspace">
+<aside id="side" aria-label="World controls">
+  <details class="panel" open><summary>Generate</summary><div class="panel-body">
+  <div class="seed-row"><label for="seed" title="Reuse the same seed and generation settings to recreate a world."><span>Seed</span><input type="text" id="seed" value="desolation"></label><button id="rnd" aria-label="Generate a random seed" title="Choose a random seed and generate a new world.">Roll</button></div>
+  <label title="Sandbox generates a general-purpose world. Desolation Day adds story sites and alien infestation."><span>Scenario</span><select id="scenario"><option value="sandbox">Sandbox</option><option value="desolation">Desolation Day</option></select></label>
+  <label title="Physical width and length of the whole map, including any water."><span>Footprint</span><select id="fp">
+    <option value="100">100 × 100 km</option><option value="20">20 × 20 km</option>
+    <option value="16" selected>16 × 16 km</option><option value="10">10 × 10 km</option></select></label>
+  <label title="Choose an island outline or a mainland landform. Random island uses the seed to pick an outline."><span>Terrain type</span><select id="shape"><optgroup label="Islands"><legend>Islands</legend><option value="random">Random island (per seed)</option>
+    <option value="round">Round</option><option value="elongated">Elongated</option><option value="crescent">Crescent / big bay</option>
+    <option value="twin">Twin-lobed</option><option value="branching">Peninsulas</option><option value="archipelago">Main + islets</option>
+    <option value="hook">Hooked coast</option><option value="inlets">Mountain inlets</option><option value="headlands">Asymmetric headlands</option></optgroup>
+    <optgroup label="Mainland"><legend>Mainland</legend><option value="rolling">Rolling hills</option><option value="mountainous">Mountainous valleys</option><option value="plateaus">Stepped plateaus</option><option value="coastal">Coastal cliffs</option></optgroup></select></label>
+  <label title="Samples per side in the terrain simulation. Higher grids resolve finer features and take longer."><span>Grid</span><select id="size"><option value="505">505 (quick preview)</option><option value="1009" selected>1009 (balanced)</option><option value="2017">2017 (high detail, slower)</option></select></label>
+  <label title="Auto uses WebGPU for base terrain when available. Choose CPU to reproduce older maps."><span>Terrain compute</span><select id="compute"><option value="auto">Auto (WebGPU)</option><option value="cpu">CPU</option></select></label>
+  <label title="Strength of mountain ridges. Elevation separately scales the whole height field."><span>Mountains</span><input id="mtn" type="range" min=".6" max="1.5" step=".05" value="1"></label>
+  <label title="Target number of carved lake basins. Natural lakes may also form where water collects."><span>Lakes</span><input id="lakes" type="range" min="0" max="12" step="1" value="6"></label>
+  <label title="Higher values draw streams from smaller drainage catchments."><span>River density</span><input id="riv" type="range" min=".5" max="2" step=".1" value="1"></label>
+  <label title="Scales vertical relief across the map, including offshore depths."><span>Elevation</span><input id="elevation" type="range" min="0" max="1" step=".01" value=".5"></label>
+  <label title="Controls how deeply drainage channels erode before the river beds are carved."><span>Erosion</span><input id="erosion" type="range" min="0" max="1" step=".01" value=".3"></label>
+  <label title="Raises or lowers the elevation where the snow biome and snow material begin."><span>Snow line</span><input id="snowLine" type="range" min="0" max="1" step=".01" value=".8"></label>
+  <label title="Controls the spacing of terrain features. Higher values place details closer together."><span>Terrain scale</span><input id="terrainScale" type="range" min=".005" max=".03" step=".001" value=".01"></label>
+  <button class="go" id="gen" title="Generate a world with the current settings. This clears manual POI moves.">Generate terrain</button>
+  </div></details>
+
+  <details class="panel" open><summary>Map layers</summary><div class="panel-body">
+  <label title="Choose what the map colors represent. The legend changes with the mode."><span>Mode</span><select id="mode">
+    <option value="terrain">Satellite terrain</option><option value="topographic">Topographic terrain</option><option value="height">Grayscale height</option><option value="biome">Biomes</option><option value="materials">Material weights</option><option value="regions">Regions</option>
+    <option value="ecology">Alien infestation (start state)</option><option value="resources">Resources</option>
+    <option value="slope">Travel difficulty</option><option value="zones">Progression zones</option></select></label>
+  <label hidden title="Show streams and rivers as blue lines."><input type="checkbox" id="oHyd" checked><span>Rivers</span></label>
+  <label hidden title="Show the regional highway, road and trail networks."><input type="checkbox" id="oRoad" checked><span>Roads &amp; trails</span></label>
+  <label hidden title="Show place markers in 2D or major place labels in 3D."><input type="checkbox" id="oPoi" checked><span>Points of interest</span></label>
+  <label hidden title="Show names alongside major point-of-interest markers."><input type="checkbox" id="oLab" checked><span>Labels</span></label>
+  <label hidden title="Also name smaller places. Zoom in to give the labels more room."><input type="checkbox" id="oLab2"><span>Minor labels (zoom in)</span></label>
+  <label hidden title="Show building footprints or models and local settlement streets."><input type="checkbox" id="oBld" checked><span>Buildings &amp; streets</span></label>
+  <label hidden title="Draw lines at regular elevation intervals. Topographic mode always shows them."><input type="checkbox" id="oCont"><span>Contour lines</span></label>
+  <label hidden title="Mark the generated starting region and its smaller development area."><input type="checkbox" id="oSlice" checked><span>Vertical slice / dev area</span></label>
+  <label hidden title="Show generated routes along which alien infestation can spread."><input type="checkbox" id="oCor"><span>Alien corridors</span></label>
+  <label hidden title="Divide the 2D map into ten equal sections per side."><input type="checkbox" id="oGrid"><span>Grid (1/10 footprint)</span></label>
+  <label hidden title="Show underground metro alignments as dashed cyan lines."><input type="checkbox" id="oMetro" checked><span>Underground metro</span></label>
+  <label hidden title="Drag a movable point of interest on the 2D map. Roadside facilities snap to nearby streets."><input type="checkbox" id="editPoi"><span>Move POIs by dragging on the 2D map</span></label>
+  <button id="undoPoi" hidden disabled title="Restore the most recent point-of-interest move.">Undo POI move</button>
+  </div></details>
+
+  <details class="panel" open><summary>Export</summary><div class="panel-body">
+  <label title="Pixels per side for single heightmaps and masks. Terrain tiles use their own grid."><span>Export size</span><select id="xres"><option value="0">Same as grid</option><option value="2017">2017</option><option value="4033" selected>4033 (detail added)</option><option value="8129">8129 (very high memory use)</option></select></label>
+  <button class="secondary full" id="xAll" title="Download the heightmap, layers, masks, world data and import script for Unreal.">Export Unreal package</button>
+  <div class="row"><button id="xPy" title="Download the Unreal Editor Python script for placing markers, volumes and splines.">Unreal import .py</button><button id="xMasks" title="Download density and exclusion maps for procedural placement.">PCG masks</button><button id="xCsv" title="Download places, roads, buildings and resources as tables.">Data tables .csv</button></div>
+  <div class="row"><button id="xR16" title="Download the 16-bit heightmap for Unreal Landscape.">Heightmap .r16</button><button id="xPng" title="Download an 8-bit grayscale height preview.">Preview .png (8-bit)</button></div>
+  <div class="row"><button id="xUnity" title="Download Unity-compatible RAW height data and scale metadata.">Unity heightmap</button><button id="xGodot" title="Download RAW height data and scale metadata for Godot terrain tools.">Godot height data</button></div>
+  <button class="secondary full" id="xUnityPack" title="Download terrain data, material masks and a Unity Editor importer in a ZIP.">Export Unity bundle</button>
+  <div class="row"><button id="xLayers" title="Download one grayscale weightmap per terrain material.">Layer weightmaps</button><button id="xWater" title="Download the mask for mapped ocean and lakes.">Water mask</button></div>
+  <div class="row"><button id="xSlice" title="Crop the 16-bit heightmap to the generated starting region.">Slice crop .r16</button><button id="xEco" title="Download the ecology grid, resource stock and infestation data.">EcologyGrid .json</button></div>
+  <div class="row"><button id="xMap" title="Download the current map colors and overlays as an image.">Map .png</button><button id="xJson" title="Download world settings, locations and geometry as JSON.">World data .json</button></div>
+  </div></details>
+
+  <details class="panel"><summary>Terrain tiles</summary><div class="panel-body">
+  <label title="Choose the tile size, file format and import metadata for the target engine."><span>Engine</span><select id="tileEngine"><option value="unreal">Unreal</option><option value="unity">Unity</option></select></label>
+  <label title="Tiles per side. More tiles increase the number of height samples across the same footprint."><span>Grid</span><select id="tileCount"><option value="2">2 × 2</option><option value="4">4 × 4</option><option value="8" selected>8 × 8</option><option value="16">16 × 16</option></select></label>
+  <div class="row">
+    <label title="Tile column, starting at zero on the west edge."><span>Column (X)</span><input type="number" id="tileX" min="0" max="7" step="1" value="0"></label>
+    <label title="Tile row, starting at zero on the north edge."><span>Row (Y)</span><input type="number" id="tileY" min="0" max="7" step="1" value="0"></label>
+  </div>
+  <label hidden title="Overlay the export tile boundaries and highlight the selected tile on the 2D map."><input type="checkbox" id="oTileGrid"><span>Show tile grid and selection</span></label>
+  <div id="tileInfo" aria-live="polite"></div>
+  <button id="xTile" title="Download the tile at the selected column and row.">Export selected tile</button>
+  <button class="secondary full" id="xTiles" title="Download the full grid of matching heightmap tiles in one ZIP.">Export all tiles</button>
+  <progress id="tileProgress" aria-label="Terrain tile export progress" hidden></progress>
+  </div></details>
+
+  <details class="panel"><summary>World statistics</summary><div class="panel-body"><pre id="stats"></pre></div></details>
+
+  <details class="panel"><summary>POI symbols</summary><div class="panel-body lg" id="legend"></div></details>
+</aside>
+<main id="main" aria-label="Terrain map">
+  <div id="bar"><button class="secondary" id="v3d" title="Switch between the 2D map and 3D terrain preview.">3D view</button>
+    <span id="c3d" hidden>Height ×<input id="ex3d" type="range" aria-label="Height exaggeration" title="Exaggerate terrain height in the 3D preview. A value of 1 keeps true scale." min="1" max="4" step=".25" value="1"><span id="ex3dL">1 (true scale)</span></span>
+    <button id="zOut" aria-label="Zoom out" title="Zoom out on the 2D map.">−</button><span id="zLab">100%</span><button id="zIn" aria-label="Zoom in" title="Zoom in on the 2D map.">+</button><button id="zFit" title="Fit the 2D map to the viewport.">Fit</button>
+    <div id="hover">Scroll to zoom · drag to pan</div>
+    <div id="status" role="status"></div>
+  </div>
+  <canvas id="cv"></canvas>
+  <canvas id="ov"></canvas>
+  <div id="box3d" hidden></div>
+</main>
+<details id="mapLegend" open hidden>
+  <summary id="mapLegendTitle" title="Expand or collapse the legend for the active map layer.">Map legend</summary>
+  <div id="mapLegendBody" tabindex="0" aria-label="Map legend entries"></div>
+</details>
+</div>
+
+</body>
+</html>

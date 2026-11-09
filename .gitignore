@@ -1,0 +1,13 @@
+# Local logs and OS metadata
+*.log
+.DS_Store
+Thumbs.db
+
+# Generated terrain and engine exports
+/exports/
+/*.r16
+/*.raw
+/*.unitypackage
+/*_unity.zip
+/*_unreal_*x*_*.zip
+/*_unity_*x*_*.zip
