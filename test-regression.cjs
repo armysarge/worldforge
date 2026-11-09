@@ -27,6 +27,11 @@ const channelRun = w => { let best = 0; for (const r of w.roads) { let run = 0; 
     for (const rv of w.rivers.filter(rv => rv.distributary)) assert(w.ocean[rv.end], `${seed}: delta branches reach the sea`);
     rows.push({ seed, shape, roads: w.roads.length, pois: w.pois.length, rivers: w.rivers.length, deltas: r.deltas, 'flood km²': +r.floodplainKm2.toFixed(1), falls: r.waterfalls, uphill: r.uphill || 0, 'river run m': Math.round(channelRun(w)), fingerprint: fingerprint(w) });
   }
+  for (const level of ['light', 'strong']) {
+    const e = await app.generate({ seed: 'r5', shape: 'mountainous', hydraulic: level }), r = e.reality;
+    assert(r.erosion && r.erosion.incisedM > 0 && r.undrained === 0 && r.badEnd === 0 && e.stats.unreachable.length === 0 && e.h.every(Number.isFinite), `erosion ${level} keeps the world valid`);
+  }
+  app.set('hydraulic', 'off');
   const plain = await app.generate({ seed: 'r4', shape: 'coastal', landforms: 'off' });
   assert(!plain.floodM.some(Boolean) && !plain.rivers.some(rv => rv.distributary), 'River landforms off adds no floodplain or delta');
   app.set('landforms', 'on');

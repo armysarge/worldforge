@@ -492,6 +492,7 @@ function realityText() {
     `  ${ok(!r.uphill)} river beds rising downstream: ${r.uphill}\n` +
     `  ${ok(!r.undrained)} land cells that can't drain (final terrain): ${r.undrained}\n` +
     `  ${ok(!r.badEnd)} rivers without a valid outlet: ${r.badEnd}\n` +
+    (r.erosion ? `  ${ok(true)} erosion (${r.erosion.level}): ${r.erosion.iterations} iterations on a ${r.erosion.grid} grid\n` : '') +
     `  ${ok(true)} river landforms: ${r.deltas || 0} deltas, ${(r.floodplainKm2 || 0).toFixed(1)} km² floodplain, ${r.waterfalls || 0} waterfalls\n` +
     (S.mainland ? `  Rivers continuing off the map: ${S.rivers.filter(p => p.exitsMap).length}\n` : '') +
     `  ${ok(!r.wetB)} buildings in water: ${r.wetB}\n` +

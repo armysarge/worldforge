@@ -14,7 +14,7 @@ const SLICE_M = 2000, DEV_M = 1225;         // docs: vertical slice ~4 km², fir
 
 // Settings that drive generation. Read from the form on the main thread; buildWorld itself never touches the DOM,
 // so it can run in a Web Worker (js/worker.js).
-const GEN_SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms'];
+const GEN_SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms', 'hydraulic'];
 const readGenSettings = () => Object.fromEntries(GEN_SETTING_IDS.map(id => [id, $(id).value]));
 // river width/depth from catchment: plain functions can't cross the worker boundary, so they are rebuilt from riverT and ez
 function attachRiverFns(world) {
@@ -110,6 +110,11 @@ async function buildWorld(settings, onStatus = () => {}) {
   const terrainBackend = accelerated ? 'webgpu' : 'cpu', terrainSeconds = (performance.now() - baseStart) / 1000;
   const terrainComputeLabel = accelerated ? 'WebGPU' : useGPU ? 'CPU fallback' : 'CPU';
 
+  // erosion (optional): stream-power river incision and slope relaxation on the base terrain, before lakes and rivers are laid out
+  const EROSION = { light: { iterations: 15, strength: .15 }, strong: { iterations: 30, strength: .4 } }[val('hydraulic')];
+  let erosionInfo = null;
+  if (EROSION) { await status('1/10 Erosion…'); erosionInfo = { level: val('hydraulic'), ...erodeTerrain(h, n, cell, EROSION) }; }
+
   // lake basins carved into valleys
   await status('2/10 Lake basins…');
   const lakeSites = [], gradMax = .1 * Math.max(1, ez / sc);
@@ -166,7 +171,7 @@ async function buildWorld(settings, onStatus = () => {}) {
 
   // reality rule: water is re-solved on the eroded surface BEFORE rivers are traced. Lakes = closed basins filled exactly
   // to their spill level; every hollow too small to be a lake is filled, so all water reaches the sea or a lake.
-  const reality = { pitsFilled: 0, viaducts: 0, tunnels: 0, culverts: 0 };
+  const reality = { pitsFilled: 0, viaducts: 0, tunnels: 0, culverts: 0, erosion: erosionInfo };
   {
     const r2 = priorityFlood(h, n); classifyWater(r2.fl);
     for (let i = 0; i < N2; i++) if (!ocean[i] && !lakeId[i] && r2.fl[i] > h[i]) { h[i] = r2.fl[i]; reality.pitsFilled++; }
