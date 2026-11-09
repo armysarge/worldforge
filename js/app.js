@@ -109,11 +109,15 @@ function refreshPoiEdits() {
 // ---------- wiring ----------
 $('gen').onclick = async () => {
   if ($('gen').disabled) return;
-  $('gen').disabled = $('rnd').disabled = true;
+  $('gen').disabled = $('rnd').disabled = true; $('cancelGen').hidden = false;
   try { await generate(); syncHash(); }
-  catch (e) { $('status').textContent = 'Error: ' + e.message; console.error(e); }
-  finally { $('gen').disabled = $('rnd').disabled = false; }
+  catch (e) {
+    if (e.name === 'GenerationCancelled') { $('status').textContent = S ? 'Generation cancelled. Showing the previous world.' : 'Generation cancelled.'; }
+    else { $('status').textContent = 'Error: ' + e.message; console.error(e); }
+  }
+  finally { $('gen').disabled = $('rnd').disabled = false; $('cancelGen').hidden = true; }
 };
+$('cancelGen').onclick = cancelGeneration;
 $('rnd').onclick = () => { $('seed').value = Math.random().toString(36).slice(2, 8); $('gen').click(); };
 for (const id of ['mode', 'oHyd', 'oRoad', 'oPoi', 'oLab', 'oLab2', 'oBld', 'oCont', 'oSlice', 'oCor', 'oGrid', 'oMetro']) $(id).onchange = render;
 $('editPoi').onchange = updateMapControls;

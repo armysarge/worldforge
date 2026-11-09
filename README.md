@@ -60,6 +60,10 @@ Choose **CPU** to reproduce maps made before WebGPU support. The GPU shader uses
 
 If Auto reports **CPU fallback**, check that browser graphics acceleration is enabled. If WebGPU is unavailable when opening the HTML directly, try serving the project folder on localhost. For example, run `python -m http.server 8000 --bind 127.0.0.1` and open `http://localhost:8000`. [Chrome WebGPU troubleshooting](https://developer.chrome.com/docs/web-platform/webgpu/troubleshooting-tips)
 
+### Background generation
+
+When the project is served (for example on localhost, as above), generation runs in a Web Worker: the page stays responsive and **Cancel** stops a run immediately. Opened directly as a file, generation runs on the page and **Cancel** stops it at the next stage. Both produce the same world.
+
 ## Engine exports
 
 | Engine | Export button | Output |

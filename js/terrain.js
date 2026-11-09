@@ -12,34 +12,47 @@ const RESIST = [0, 50, 30, 40, 55, 75, 90, 15, 0, 25];
 const ECO_CELL = 250;                       // docs: EcologyGrid, 250 m cells
 const SLICE_M = 2000, DEV_M = 1225;         // docs: vertical slice ~4 km², first playable ~1.5 km²
 
-async function generate() {
-  const t0 = performance.now();
-  const scenario = $('scenario').value, story = scenario === 'desolation';
-  const seedStr = $('seed').value || '1', R = mulberry(hashSeed(seedStr)), noise = mkNoise(R), F = (x, y, o) => fbm(noise, x, y, o);
-  const FK = +$('fp').value, sizeM = FK * 1000, sc = FK / 100, sq = Math.sqrt(sc);
+// Settings that drive generation. Read from the form on the main thread; buildWorld itself never touches the DOM,
+// so it can run in a Web Worker (js/worker.js).
+const GEN_SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale'];
+const readGenSettings = () => Object.fromEntries(GEN_SETTING_IDS.map(id => [id, $(id).value]));
+// river width/depth from catchment: plain functions can't cross the worker boundary, so they are rebuilt from riverT and ez
+function attachRiverFns(world) {
+  const { riverT: T, ez } = world;
+  world.riverW = a => 2 + 2.5 * Math.sqrt(a);
+  world.riverD = a => Math.min(30, 3 + 4 * Math.log2(Math.max(1, a / T))) * ez;
+  return world;
+}
+class GenerationCancelled extends Error { constructor() { super('Generation cancelled'); this.name = 'GenerationCancelled'; } }
+
+async function buildWorld(settings, onStatus = () => {}) {
+  const val = id => settings[id] ?? '';
+  const scenario = val('scenario'), story = scenario === 'desolation';
+  const seedStr = val('seed') || '1', R = mulberry(hashSeed(seedStr)), noise = mkNoise(R), F = (x, y, o) => fbm(noise, x, y, o);
+  const FK = +val('fp'), sizeM = FK * 1000, sc = FK / 100, sq = Math.sqrt(sc);
   const ez = Math.min(1, Math.pow(sc, .6));  // elevation scale: small islands get lower, but still steep, relief
   const M = v => v * sc;                      // design distances below are authored for the 100 km footprint
   const cnt = b => Math.max(1, Math.round(b));
-  const n = +$('size').value, cell = sizeM / (n - 1), N2 = n * n, cellKm2 = cell * cell / 1e6;
+  const n = +val('size'), cell = sizeM / (n - 1), N2 = n * n, cellKm2 = cell * cell / 1e6;
   const OC = 5 + Math.max(0, Math.round(Math.log2((n - 1) / 504)));   // more noise octaves at finer grids
-  const mtnAmp = +$('mtn').value, nLakes = +$('lakes').value, dens = +$('riv').value;
-  const setting = (id, fallback) => { const v = $(id).value; return v === '' || v == null ? fallback : +v; };
+  const mtnAmp = +val('mtn'), nLakes = +val('lakes'), dens = +val('riv');
+  const setting = (id, fallback) => { const v = settings[id]; return v === '' || v == null ? fallback : +v; };
   const terrainSettings = {
     elevation: setting('elevation', .5), erosion: setting('erosion', .3),
     snowLine: setting('snowLine', .8), scale: setting('terrainScale', .01)
   };
   const frequency = terrainSettings.scale * 100, elevation = .4 + 1.2 * terrainSettings.elevation;
   const snowM = (300 + 2000 * terrainSettings.snowLine) * ez;
-  const useGPU = $('compute').value === 'auto';
+  const useGPU = val('compute') === 'auto';
   const stageTimes = []; let stageName = null, stageStart = performance.now();            // seconds spent in each generation stage
   const lapStage = () => { const now = performance.now(); if (stageName) stageTimes.push([stageName, (now - stageStart) / 1000]); stageStart = now; };
-  const status = m => { lapStage(); stageName = m.replace(/…$/, ''); $('status').textContent = m; return new Promise(r => setTimeout(r)); };
+  const status = m => { lapStage(); stageName = m.replace(/…$/, ''); return Promise.resolve(onStatus(m)).then(() => new Promise(r => setTimeout(r))); };   // onStatus may throw GenerationCancelled
   const pick = a => a[R() * a.length | 0];
 
   // 1. coastline + mountains ------------------------------------------
   await status('1/10 Base terrain…');
   // island outline = smooth union of elliptical blobs (minus cut-outs), picked per archetype
-  const shape = $('shape').value === 'random' ? pick(SHAPES) : $('shape').value;
+  const shape = val('shape') === 'random' ? pick(SHAPES) : val('shape');
   const A = R() * 6.2832, ca = Math.cos(A), sa = Math.sin(A), add = [], sub = [], mainland = MAINLAND[shape];
   const profile = mainland ? buildMainlandProfile(shape, F, ca, sa, frequency) : null;
   const blob = (x, y, rx, ry, ang = A) => ({ x, y, rx, ry, c: Math.cos(ang), s: Math.sin(ang), ang });
@@ -1321,13 +1334,51 @@ async function generate() {
   { const c = {}; for (const p of pois) p.id = `${p.type}_${String(c[p.type] = (c[p.type] || 0) + 1).padStart(3, '0')}`; }   // stable per seed + settings
   for (const street of streets) { street.town = street.owner.id; delete street.owner; }
   for (const b of buildings) if (b.poi) { b.poiId = b.poi.id; delete b.poi; }
-  S = { seed: seedStr, scenario, shape, mainland: !!mainland, terrainSettings, terrainBackend, terrainSeconds, sizeM, sc, n, k: Math.max(1, Math.round(2020 / n)), cell, h, ocean, lakeId, lakes, land, riv, acc, flow, rivers, riverW: widthOf, riverD: depthOf, riverT: T, hcache: {}, biome, moist, slope, shade, zone, region, stageT,
+  const world = { ez, seed: seedStr, scenario, shape, mainland: !!mainland, terrainSettings, terrainBackend, terrainSeconds, sizeM, sc, n, k: Math.max(1, Math.round(2020 / n)), cell, h, ocean, lakeId, lakes, land, riv, acc, flow, rivers, riverW: widthOf, riverD: depthOf, riverT: T, hcache: {}, biome, moist, slope, shade, zone, region, stageT,
     pois, roads, corridors, corW: M(1500), hmin, hmax, slice, urban, buildings, streets, menuCam, reality, travel, rimL, chanM, roadBedM, resStats, deposits,
     res: Object.fromEntries(Object.entries(res).map(([k, a]) => [k, Uint8Array.from(a, v => Math.round(clamp(v, 0, 1) * 255))])),
     cstep: hmax > 1500 ? 50 : hmax > 600 ? 20 : 10,
     eco: { gw, eTer, eInf, eStage, eSeed },
     stats: { landKm2: landCells * cellKm2, riverKm: rivCells * cell / 1000, peak: peakH, stageCnt, regCnt, landCells, unreachable } };
-  await status('10/10 Rendering…');
+  lapStage();
+  return { world, stageTimes, terrainSeconds, terrainComputeLabel };
+}
+
+// ---------- running a generation: Web Worker when the page is served, same thread otherwise ----------
+let genWorker = null, workerUnavailable = false, cancelRequested = false;
+const inlineBuild = settings => buildWorld(settings, m => { if (cancelRequested) throw new GenerationCancelled(); $('status').textContent = m; });
+function runBuild(settings) {
+  // Chrome refuses module-less workers from file:// pages, so opening index.html directly keeps generation on the page
+  if (workerUnavailable || typeof Worker === 'undefined' || typeof location === 'undefined' || location.protocol === 'file:') return inlineBuild(settings);
+  return new Promise((resolve, reject) => {
+    try { genWorker ??= new Worker('js/worker.js'); } catch (e) { workerUnavailable = true; return resolve(inlineBuild(settings)); }
+    const w = genWorker;
+    w.onmessage = ({ data }) => {
+      if (data.status) $('status').textContent = data.status;
+      else if (data.error) reject(Object.assign(new Error(data.error), { stack: data.stack }));
+      else if (data.result) resolve(data.result);
+    };
+    w.onerror = e => {                       // the worker script itself failed to load or crashed: fall back to this thread
+      e.preventDefault?.(); console.warn('Generation worker failed. Running on the page.', e.message);
+      workerUnavailable = true; w.terminate(); genWorker = null; resolve(inlineBuild(settings));
+    };
+    runBuild.cancel = () => { w.terminate(); genWorker = null; reject(new GenerationCancelled()); };
+    w.postMessage({ settings });
+  });
+}
+function cancelGeneration() {
+  cancelRequested = true;                    // same-thread build stops at its next stage
+  runBuild.cancel?.();                       // worker build stops immediately
+}
+
+async function generate() {
+  const t0 = performance.now(), settings = readGenSettings();
+  cancelRequested = false; runBuild.cancel = null;
+  const { world, stageTimes, terrainSeconds, terrainComputeLabel } = await runBuild(settings);
+  runBuild.cancel = null;
+  S = attachRiverFns(world);
+  const story = S.scenario === 'desolation', tail0 = performance.now();
+  $('status').textContent = '10/10 Rendering…';
   const ecologyMode = $('mode').querySelector('[value="ecology"]');
   ecologyMode.hidden = ecologyMode.disabled = !story;
   if (!story && $('mode').value === 'ecology') $('mode').value = 'terrain';
@@ -1335,7 +1386,7 @@ async function generate() {
   S.metro = buildMetro(S);
   for (const street of S.streets) street.grade = streetGrade(S, street.pts);
   auditRoadAccess(S);
-  lapStage(); stageName = null; S.stageTimes = stageTimes; S.stageTimes.push(['Base terrain (inside stage 1)', terrainSeconds]);
+  stageTimes.push(['10/10 Rendering', (performance.now() - tail0) / 1000]); S.stageTimes = stageTimes; S.stageTimes.push(['Base terrain (inside stage 1)', terrainSeconds]);
   console.table(stageTimes.map(([stage, seconds]) => ({ stage, seconds: +seconds.toFixed(2) })));
   render(); updateInfo(); updateTileInfo();
   $('status').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s · Base terrain: ${terrainComputeLabel} (${terrainSeconds.toFixed(2)} s)`;

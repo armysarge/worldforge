@@ -9,7 +9,7 @@ function createApp({ root = process.env.WF_ROOT || __dirname, navigator = {} } =
   const document = { createElement: make, getElementById: id => (elements.has(id) || elements.set(id, { ...make(), value: settings[id] ?? '' }), elements.get(id)) };
   const exported = ['buildGeoJson', 'buildTerrainMesh', 'encodeGlb', 'encodeObj', 'normalMapPixels', 'settingsSnapshot', 'settingsToHash', 'settingsFromHash', 'applySettings', 'worldData']
     .map(n => `typeof ${n} === 'function' ? ${n} : undefined`).join(', ');
-  const names = ['buildGeoJson', 'buildTerrainMesh', 'encodeGlb', 'encodeObj', 'normalMapPixels', 'settingsSnapshot', 'settingsToHash', 'settingsFromHash', 'applySettings', 'worldData'];
+  const names = ['buildWorld', 'cancelGeneration', 'buildGeoJson', 'buildTerrainMesh', 'encodeGlb', 'encodeObj', 'normalMapPixels', 'settingsSnapshot', 'settingsToHash', 'settingsFromHash', 'applySettings', 'worldData'];
   const code = appCode.replace(/\nstartApp\(\);\s*$/, `\nrender = () => {}; const fns = {}; ${names.map(n => `if (typeof ${n} === 'function') fns.${n} = ${n};`).join(' ')} return { ...fns, generateWorld: async () => { await generate(); return S; } };`);
   const api = new Function('document', 'addEventListener', 'navigator', code)(document, () => {}, navigator);
   const set = (id, value) => { document.getElementById(id).value = value; };
