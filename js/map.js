@@ -464,6 +464,7 @@ function updateInfo() {
     (S.scenario === 'desolation' ? '\n\nInfestation (start)\n' + STAGE_NAME.map((r, j) => `  ${r.padEnd(20)}${pct(s.stageCnt[j])}`).join('\n') : '') +
     '\n\n' + Object.entries(c).map(([k, v]) => `${k.padEnd(12)}${v}`).join('\n') +
     (st ? `\n\nStart: ${st.name}${city ? ` (${(Math.hypot(st.x - city.x, st.y - city.y) * S.cell / 1000).toFixed(1)} km from ${city.name})` : ''}\nSlice chapter:\n${chain}` : '') +
+    (S.stageTimes ? '\n\nStage times\n' + S.stageTimes.map(([k, v]) => `  ${k.padEnd(34)}${v.toFixed(2)} s`).join('\n') : '') +
     `\n\nNo road access: ${s.unreachable.length ? s.unreachable.join(', ') : 'none'}` +
     `\n\nSurface access review (within 100 m): ${S.roadAccessReview.length ? S.roadAccessReview.map(p => p.name).join(', ') : 'clear'}` +
     resourcesText() + realityText();
@@ -484,6 +485,7 @@ function realityText() {
     `  ${ok(true)} ${r.lakes} lakes, each in a closed basin at its spill level\n` +
     `  ${ok(true)} ${r.pitsFilled} undrained hollow cells filled → all water drains (${r.culverts} road-sag cells drain via culverts)\n` +
     `  ${ok(true)} roads graded (cut & fill); bridges/culverts keep every channel open\n` +
+    `  ${ok(!r.riverRoadRuns)} longest road stretch inside a river channel: ${Math.round(r.maxRiverRunM || 0)} m${r.riverRoadRuns ? ` (${r.riverRoadRuns} routes could not avoid it)` : ''}\n` +
     (r.farmKm2 != null ? `  ${ok(true)} farmland ${r.farmKm2.toFixed(1)} km² levelled: fields under 2° ${(r.farmSlopeBefore * 100).toFixed(0)}% → ${(r.farmSlopeAfter * 100).toFixed(0)}%, ${r.farmTerracedKm2.toFixed(1)} km² on terraced hillsides\n` : '') +
     `  ${ok(true)} structures: ${r.viaducts} viaducts (longest ${Math.round(r.maxViaductM || 0)} m), ${r.tunnels} tunnels (longest ${Math.round(r.maxTunnelM || 0)} m), ${r.overpasses || 0} overpasses, ${r.trailSteps || 0} trail step sections, ${r.footbridges || 0} footbridges\n` +
     (r.curves ? Object.entries(r.curves).filter(([, c]) => c.curves).map(([k, c]) => `  ${ok(true)} ${k}: ${c.curves} curves, tightest ${Math.round(c.minR)} m (design ${({ highway: 250, road: 60, trail: 8 })[k]} m), ${c.hairpins} hairpins`).join('\n') + '\n' : '') +

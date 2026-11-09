@@ -26,7 +26,7 @@ The four views show the same generated 20 km world from the **Desolation Day** s
 ## Quick start
 
 1. Open [index.html](index.html) in a modern desktop browser. The 2D generator runs locally with no build step. The 3D preview loads Three.js from a CDN.
-2. Pick a scenario, seed, footprint, terrain type and generation grid. Use **505** for fast iteration, **1009** for a balanced grid, or **2017** for finer generation.
+2. Pick a scenario, seed, footprint, terrain type and generation grid. Use **505** for fast iteration, **1009** for a balanced grid, **2017** for finer generation, or **4033** for the most detailed simulation.
 3. Click **Generate terrain**. The collapsible legend on the map follows the selected layer. Hover over controls for a description. When a metro network exists, **Underground metro** shows its cyan dashed alignments in 2D and 3D.
 4. Pick an **Export size**, then use the export button for your engine. The generation grid drives the world simulation. A larger export adds terrain detail and resamples the existing world.
 
@@ -54,6 +54,8 @@ Choose a preset under **Terrain type → Mainland**. The terrain extends to the 
 
 **Auto** uses WebGPU for the base height field and small-scale terrain relief when the browser exposes a hardware adapter. The generator falls back to CPU when WebGPU is unavailable or the compute pass fails. The status line reports the backend and time spent on the base terrain pass. Drainage, rivers, roads, settlements and engine exports still run on the CPU.
 
+**4033** generates roughly 16.3 million samples. On a 16 km footprint, samples are about 3.97 m apart. This grid needs substantially more system memory and time, even when WebGPU is active. **8129** is an export size.
+
 Choose **CPU** to reproduce maps made before WebGPU support. The GPU shader uses 32-bit arithmetic, so small elevation differences can change a downstream river route or placement even with the same seed. World JSON and tile manifests record the backend used.
 
 If Auto reports **CPU fallback**, check that browser graphics acceleration is enabled. If WebGPU is unavailable when opening the HTML directly, try serving the project folder on localhost. For example, run `python -m http.server 8000 --bind 127.0.0.1` and open `http://localhost:8000`. [Chrome WebGPU troubleshooting](https://developer.chrome.com/docs/web-platform/webgpu/troubleshooting-tips)
@@ -67,6 +69,8 @@ If Auto reports **CPU fallback**, check that browser graphics acceleration is en
 | Godot | **Godot height data** | 16-bit little-endian RAW at the selected size and an import settings JSON. Import it with the Terrain3D add-on or read it in your own terrain system. |
 
 The browser may ask to allow multiple downloads. Keep each RAW file beside its matching JSON. The 8-bit height PNG is for previewing elevations. Use RAW or R16 for engine terrain.
+
+With a **4033** generation grid, select **Same as grid** to export native **4033 × 4033** height data for Unreal or the Terrain3D importer in Godot. The Unity exporter automatically resamples to **4097 × 4097**, a supported Unity Terrain resolution, while preserving the footprint. [Unreal Landscape sizes](https://dev.epicgames.com/documentation/unreal-engine/landscape-technical-guide-in-unreal-engine) · [Unity Terrain resolutions](https://docs.unity3d.com/6000.0/Documentation/ScriptReference/TerrainData-heightmapResolution.html) · [Terrain3D RAW import](https://terrain3d.readthedocs.io/en/stable/docs/import_export.html)
 
 ### Unreal Engine
 

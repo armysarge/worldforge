@@ -29,7 +29,7 @@
     <option value="twin">Twin-lobed</option><option value="branching">Peninsulas</option><option value="archipelago">Main + islets</option>
     <option value="hook">Hooked coast</option><option value="inlets">Mountain inlets</option><option value="headlands">Asymmetric headlands</option></optgroup>
     <optgroup label="Mainland"><legend>Mainland</legend><option value="rolling">Rolling hills</option><option value="mountainous">Mountainous valleys</option><option value="plateaus">Stepped plateaus</option><option value="coastal">Coastal cliffs</option></optgroup></select></label>
-  <label title="Samples per side in the terrain simulation. Higher grids resolve finer features and take longer."><span>Grid</span><select id="size"><option value="505">505 (quick preview)</option><option value="1009" selected>1009 (balanced)</option><option value="2017">2017 (high detail, slower)</option></select></label>
+  <label title="Samples per side in the terrain simulation. The 4033 grid uses substantially more system memory and takes longer, including with WebGPU."><span>Grid</span><select id="size"><option value="505">505 (quick preview)</option><option value="1009" selected>1009 (balanced)</option><option value="2017">2017 (high detail, slower)</option><option value="4033">4033 (very high detail)</option></select></label>
   <label title="Auto uses WebGPU for base terrain when available. Choose CPU to reproduce older maps."><span>Terrain compute</span><select id="compute"><option value="auto">Auto (WebGPU)</option><option value="cpu">CPU</option></select></label>
   <label title="Strength of mountain ridges. Elevation separately scales the whole height field."><span>Mountains</span><input id="mtn" type="range" min=".6" max="1.5" step=".05" value="1"></label>
   <label title="Target number of carved lake basins. Natural lakes may also form where water collects."><span>Lakes</span><input id="lakes" type="range" min="0" max="12" step="1" value="6"></label>
@@ -62,7 +62,7 @@
   </div></details>
 
   <details class="panel" open><summary>Export</summary><div class="panel-body">
-  <label title="Pixels per side for single heightmaps and masks. Terrain tiles use their own grid."><span>Export size</span><select id="xres"><option value="0">Same as grid</option><option value="2017">2017</option><option value="4033" selected>4033 (detail added)</option><option value="8129">8129 (very high memory use)</option></select></label>
+  <label title="Pixels per side for single heightmaps and masks. Terrain tiles use their own grid."><span>Export size</span><select id="xres"><option value="0">Same as grid</option><option value="2017">2017</option><option value="4033" selected>4033</option><option value="8129">8129 (very high memory use)</option></select></label>
   <button class="secondary full" id="xAll" title="Download the heightmap, layers, masks, world data and import script for Unreal.">Export Unreal package</button>
   <div class="row"><button id="xPy" title="Download the Unreal Editor Python script for placing markers, volumes and splines.">Unreal import .py</button><button id="xMasks" title="Download density and exclusion maps for procedural placement.">PCG masks</button><button id="xCsv" title="Download places, roads, buildings and resources as tables.">Data tables .csv</button></div>
   <div class="row"><button id="xR16" title="Download the 16-bit heightmap for Unreal Landscape.">Heightmap .r16</button><button id="xPng" title="Download an 8-bit grayscale height preview.">Preview .png (8-bit)</button></div>

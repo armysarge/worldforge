@@ -406,7 +406,9 @@ async function generate() {
   const frequency = terrainSettings.scale * 100, elevation = .4 + 1.2 * terrainSettings.elevation;
   const snowM = (300 + 2000 * terrainSettings.snowLine) * ez;
   const useGPU = $('compute').value === 'auto';
-  const status = m => { $('status').textContent = m; return new Promise(r => setTimeout(r)); };
+  const stageTimes = []; let stageName = null, stageStart = performance.now();            // seconds spent in each generation stage
+  const lapStage = () => { const now = performance.now(); if (stageName) stageTimes.push([stageName, (now - stageStart) / 1000]); stageStart = now; };
+  const status = m => { lapStage(); stageName = m.replace(/…$/, ''); $('status').textContent = m; return new Promise(r => setTimeout(r)); };
   const pick = a => a[R() * a.length | 0];
 
   // 1. coastline + mountains ------------------------------------------
@@ -889,6 +891,9 @@ async function generate() {
   const base = new Float32Array(N2), cost = new Float32Array(N2);
   // reality rule: nothing is routed across cliffs (> 48°); roads and trails go around
   for (let i = 0; i < N2; i++) base[i] = land[i] && slope[i] <= 48 ? 1 + (slope[i] / 8) ** 2 + h[i] / (1500 * ez) + [0, 2, 10, 30][riv[i]] : Infinity;
+  // the carved (meandered) channel strays several cells from the drainage cells in riv[], so it needs its own penalty:
+  // otherwise a valley road finds the free, flat river corridor and runs along (or on top of) the river instead of bridging it
+  const chanList = []; for (let i = 0; i < N2; i++) if (chanM[i]) { chanList.push(i); base[i] += 20; }
   cost.set(base);
   const G = new Float32Array(N2), FROM = new Int32Array(N2), CL = new Uint8Array(N2);
   function astar(a, b, cst, H) {
@@ -965,9 +970,28 @@ async function generate() {
     }
     return { path: path.reverse(), jd: jd.reverse() };
   }
+  // longest unbroken run of path cells lying in a river channel: a bridge crosses one (a few cells), a road along it does not
+  // a run may be as long as a diagonal crossing of that river's carved corridor (width + marking margin, ×1.25 + slack); anything longer follows it
+  const chanScan = path => { let run = 0, big = 0, best = 0, excess = 0;
+    const close = () => { if (run) { best = Math.max(best, run); excess = Math.max(excess, run - Math.max(5, Math.ceil((widthOf(big) / cell + 2) * 1.25) + 1)); } run = big = 0; };
+    for (const c of path) { if (chanM[c] || riv[c]) { run++; big = Math.max(big, acc[c]); } else close(); } close(); return { best, excess }; };
+  const chanExcess = path => chanScan(path).excess;
+  function routeAvoidingChannel(a, b, type, cst) {
+    let rt = routeRoad(a, b, type, cst);
+    for (const pen of [100, 400, 1500]) {
+      if (!rt || chanExcess(rt.path) <= 0) break;
+      const saved = Float32Array.from(chanList, i => cst[i]);                         // temporarily make the channel prohibitive, reroute, restore
+      for (const i of chanList) cst[i] += pen;
+      const r2 = routeRoad(a, b, type, cst);
+      for (let k = 0; k < chanList.length; k++) cst[chanList[k]] = saved[k];
+      if (r2 && chanExcess(r2.path) < chanExcess(rt.path)) rt = r2;
+    }
+    if (rt && chanExcess(rt.path) > 0) reality.riverRoadRuns = (reality.riverRoadRuns || 0) + 1;   // could not avoid: reported in the stats
+    return rt;
+  }
   function link(a, b, type, cst = cost, extra = {}) {
     if (a === b || linked.has(lkey(a, b))) return; linked.add(lkey(a, b));
-    const rt = routeRoad(a.i, b.i, type, cst); if (!rt) return false; const path = rt.path; extra = { ...extra, jd: rt.jd };
+    const rt = routeAvoidingChannel(a.i, b.i, type, cst); if (!rt) return false; const path = rt.path; extra = { ...extra, jd: rt.jd };
     let len = 0; for (let j = 1; j < path.length; j++) { const d = Math.abs(path[j] - path[j - 1]); len += (d === 1 || d === n ? 1 : 1.4142) * cell; }
     roads.push({ type, path, pts: smooth(path), a: a.name, b: b.name, len, ...extra }); reached.add(a); reached.add(b);
     for (const j of path) { cost[j] = Math.min(cost[j], base[j] * F_ROAD[type]); roadCell[j] = 1; }
@@ -1089,7 +1113,7 @@ async function generate() {
       }
       if (!ok) break;
     }
-    r.aligned = ok && np.length >= 2;
+    r.aligned = ok && np.length >= 2 && chanExcess(np) <= Math.max(0, chanExcess(P));   // a laid-out curve may not hug a river more than the routed line did
     if (!r.aligned) { r.pts = smooth(P); continue; }
     // short routed fallback pieces: draw/export them as a smooth line (the graded cells stay where they are)
     const sp = npts.map((q, k) => { if (!q[2]) return [q[0], q[1]]; let sx = 0, sy = 0, cN = 0; for (let d = -2; d <= 2; d++) { const o = npts[k + d]; if (o) { sx += o[0]; sy += o[1]; cN++; } } return [sx / cN, sy / cN]; });
@@ -1099,6 +1123,7 @@ async function generate() {
   }
   roadCell.fill(0); for (const r of roads) for (const c of r.path) roadCell[c] = 1;
   reality.curves = curves;
+  reality.maxRiverRunM = roads.reduce((m, r) => Math.max(m, chanScan(r.path).best), 0) * cell;       // longest stretch of any road lying in a river channel
 
   const sagM = new Uint8Array(N2);                                 // road-surface sags (drained by culverts)
   const roadBedM = new Uint8Array(N2);                             // graded road surface cells (kept smooth in hi-res exports)
@@ -1684,6 +1709,8 @@ async function generate() {
   S.metro = buildMetro(S);
   for (const street of S.streets) street.grade = streetGrade(S, street.pts);
   auditRoadAccess(S);
+  lapStage(); stageName = null; S.stageTimes = stageTimes; S.stageTimes.push(['Base terrain (inside stage 1)', terrainSeconds]);
+  console.table(stageTimes.map(([stage, seconds]) => ({ stage, seconds: +seconds.toFixed(2) })));
   render(); updateInfo(); updateTileInfo();
   $('status').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s · Base terrain: ${terrainComputeLabel} (${terrainSeconds.toFixed(2)} s)`;
 }
