@@ -1,7 +1,7 @@
 const fs = require('fs'), assert = require('assert'), vm = require('vm'), path = require('path');
-const terrainCode = fs.readFileSync(path.join(__dirname, 'js', 'terrain.js'), 'utf8');
+const terrainCode = fs.readFileSync(path.join(__dirname, 'js', 'hydrology.js'), 'utf8');
 const exportCode = fs.readFileSync(path.join(__dirname, 'js', 'exports.js'), 'utf8');
-const carve = terrainCode.slice(terrainCode.indexOf('function carveRivers('), terrainCode.indexOf('// ---------- generator ----------'));
+const carve = terrainCode.slice(terrainCode.indexOf('function carveRivers('));
 const layerCode = exportCode.slice(exportCode.indexOf('const LAYER_NAMES'), exportCode.indexOf("$('xWater').onclick ="));
 const setupCode = exportCode.slice(exportCode.indexOf('function ueSetup()'), exportCode.indexOf('const ueP ='));
 const ctx = { Math, Float32Array, Uint8Array, clamp: (v,a,b)=>Math.max(a,Math.min(b,v)), lerp:(a,b,t)=>a+(b-a)*t };
