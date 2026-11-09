@@ -3,6 +3,10 @@
 .DS_Store
 Thumbs.db
 
+# Minified web assets
+*.min.css
+*.min.js
+
 # Generated terrain and engine exports
 /exports/
 /*.r16
