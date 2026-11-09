@@ -387,16 +387,23 @@ async function buildWorld(settings, onStatus = () => {}) {
   // rural belt: farms near villages/towns, farmland around them
   place('farm', cnt(6 + 12 * sq), (i, x, y) => biome[i] !== 2 && biome[i] !== 3 || slope[i] > 6 ? NEG :
     flatB(M(800))[i] * 2 + Math.exp(-dW[i] / M(1500)) - nearKm(x, y, ['village', 'town']) / M(4), M(2));
+  const sitePrep = new Uint8Array(N2);   // town ground levelled like a field plot (building sites), but not farmed
   // farmland: the gentle ground around farms, villages and towns has been cleared and farmed (woodlots and wet ground kept)
   {
     const src = new Uint8Array(N2); for (const p of pois) if (['farm', 'village', 'town', 'city'].includes(p.type)) src[p.i] = 1;
     const dF = chamfer(n, cell, src); let before = 0, n9 = 0;
+    // settlements are built up, not farmed: keep fields outside the largest footprint each settlement can take (its final
+    // radius is chosen later), plus a garden/verge margin
+    const townM = new Uint8Array(N2); sitePrep.fill(0);
+    for (const p of pois) { const c = SET[p.type]; if (!c) continue;
+      const r = (c[0] * 1.15 + Math.max(60, cell)) / cell, rc = Math.ceil(r);
+      for (let y = Math.max(0, p.y - rc); y <= Math.min(n - 1, p.y + rc); y++) for (let x = Math.max(0, p.x - rc); x <= Math.min(n - 1, p.x + rc); x++) if (Math.hypot(x - p.x, y - p.y) <= r) townM[y * n + x] = 1; }
     for (let i = 0; i < N2; i++) {
       const x = i % n, y = i / n | 0, b = biome[i];
       const FR = Math.max(M(2600), 1200);                                                          // fields reach ~1.2 km+ from farmsteads (real distance)
       if (!land[i] || riv[i] || chanM[i] || slope[i] >= 9 || h[i] > 350 * ez || dF[i] > FR) continue;
       const near = 1 - dF[i] / FR;                                                                 // the closer to a farm, the more of it is cleared
-      if (b === 2 || (b === 3 && noise(x * .06 + 71, y * .06 + 71) + near * .6 > .15)) { biome[i] = 9; before += slope[i] < 2 ? 1 : 0; n9++; }
+      if (b === 2 || (b === 3 && noise(x * .06 + 71, y * .06 + 71) + near * .6 > .15)) { if (townM[i]) { sitePrep[i] = 1; biome[i] = 2; continue; } biome[i] = 9; before += slope[i] < 2 ? 1 : 0; n9++; }
     }
     reality.farmKm2 = n9 * cellKm2; reality.farmSlopeBefore = n9 ? before / n9 : 0;   // share of field area under 2° before levelling
     for (let i = 0; i < N2; i++) forArr[i] = biome[i] === 3 ? 1 : 0;
@@ -407,7 +414,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   // ground). Rivers, drainage lines (field ditches) and lake shores are left alone; field edges feather into the ground.
   {
     const fm = new Float32Array(N2);
-    for (let i = 0; i < N2; i++) fm[i] = biome[i] === 9 && !riv[i] && !chanM[i] && acc[i] < aT && !(rimL[i] > -Infinity) ? 1 : 0;
+    for (let i = 0; i < N2; i++) fm[i] = (biome[i] === 9 || sitePrep[i]) && !riv[i] && !chanM[i] && acc[i] < aT && !(rimL[i] > -Infinity) ? 1 : 0;
     const fsz = Math.max(160, cell * 3) / cell, fc = Math.cos(.5), fsn = Math.sin(.5), MAXT = Math.tan(1.5 / 57.3);
     const plot = i => { const x = i % n, y = i / n | 0; return Math.floor((x * fc + y * fsn) / fsz) * 100003 + Math.floor((y * fc - x * fsn) / fsz); };
     const P2 = new Map();                                                                         // per plot: least-squares plane of the ground
@@ -1180,6 +1187,9 @@ async function buildWorld(settings, onStatus = () => {}) {
   for (let i = 0; i < N2; i++) cc[i] = ocean[i] ? Infinity : lakeId[i] ? 3 : (1 + (slope[i] / 12) ** 2) * (riv[i] ? .35 : 1);
   const corridors = [];
   if (city) for (const p of pois) if (p.type === 'seed') { const path = astar(p.i, city.i, cc, .5); if (path) corridors.push({ from: p.name, pts: smooth(path) }); }
+
+  // built-up ground is never farmland (outlying buildings can still land on a field edge): show it as grass under the town
+  { let cleared = 0; for (let i = 0; i < N2; i++) if (urban[i] && biome[i] === 9) { biome[i] = 2; cleared++; } reality.farmUrbanCleared = cleared; }
 
   // 6. EcologyGrid start state: spread from seed engines along valleys/rivers
   await status('9/10 EcologyGrid…');

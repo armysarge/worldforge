@@ -19,6 +19,11 @@ const channelRun = w => { let best = 0; for (const r of w.roads) { let run = 0; 
     assert(w.h.every(Number.isFinite), `${seed}: finite heights`);
     for (let i = 0; i < w.h.length; i++) if (w.floodM[i]) assert(w.land[i] && !w.chanM[i] && !w.lakeId[i], `${seed}: floodplain is land beside the channel`);
     for (const f of w.pois.filter(p => p.type === 'waterfall')) assert(w.land[f.i] && f.dropM >= 6 && / Falls$/.test(f.name), `${seed}: waterfall ${f.name}`);
+    const towns = w.pois.filter(p => p.radius);
+    for (let i = 0; i < w.h.length; i++) if (w.biome[i] === 9) {
+      assert(!w.urban[i], `${seed}: no farmland under buildings`);
+      const x = i % w.n, y = i / w.n | 0; assert(!towns.some(p => Math.hypot(p.x - x, p.y - y) * w.cell < p.radius), `${seed}: no farmland inside a settlement`);
+    }
     for (const rv of w.rivers.filter(rv => rv.distributary)) assert(w.ocean[rv.end], `${seed}: delta branches reach the sea`);
     rows.push({ seed, shape, roads: w.roads.length, pois: w.pois.length, rivers: w.rivers.length, deltas: r.deltas, 'flood km²': +r.floodplainKm2.toFixed(1), falls: r.waterfalls, uphill: r.uphill || 0, 'river run m': Math.round(channelRun(w)), fingerprint: fingerprint(w) });
   }
