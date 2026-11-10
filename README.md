@@ -1,4 +1,4 @@
-# Worldforge
+# [WIP] Worldforge
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Donate-brightgreen?logo=buymeacoffee)](https://www.buymeacoffee.com/armysarge)
 [![JavaScript](https://img.shields.io/badge/JavaScript-Browser-f7df1e?logo=javascript&logoColor=white)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
@@ -25,9 +25,9 @@ The four views show the same generated 20 km world from the **Desolation Day** s
 
 ## Quick start
 
-1. Open [index.html](index.html) in a modern desktop browser. The 2D generator runs locally with no build step. The 3D preview loads Three.js from a CDN.
-2. Pick a scenario, seed, footprint, terrain type and generation grid. Use **505** for fast iteration, **1009** for a balanced grid, **2017** for finer generation, or **4033** for the most detailed simulation.
-3. Click **Generate terrain**. The collapsible legend on the map follows the selected layer. Hover over controls for a description. When a metro network exists, **Underground metro** shows its cyan dashed alignments in 2D and 3D.
+1. Open [index.html](index.html) in a modern desktop browser. The 2D generator runs locally with no build step. The 3D view loads three.js from a CDN the first time it is opened.
+2. Pick a **Preset** for a one-click starting point (farmland island, alpine island, wild archipelago, rolling countryside, mountain valleys, dry plateaus or cliff coast), or set things yourself: pick a scenario, seed, footprint, terrain type and generation grid. Use **505** for fast iteration, **1009** for a balanced grid, **2017** for finer generation, or **4033** for the most detailed simulation.
+3. Click **Generate terrain**. Two bars under the toolbar show progress: **Overall** for the whole job and **Step** for the stage or file in hand. They also run during exports. The collapsible legend on the map follows the selected layer. Hover over controls for a description. When a metro network exists, **Underground metro** shows its cyan dashed alignments in 2D and 3D.
 4. Pick an **Export size**, then use the export button for your engine. The generation grid drives the world simulation. A larger export adds terrain detail and resamples the existing world.
 
 | Scenario | Generated world |
@@ -35,7 +35,20 @@ The four views show the same generated 20 km world from the **Desolation Day** s
 | **Sandbox** | The default. Terrain, settlements, infrastructure, resources, starting region and progression zones for a general game project. |
 | **Desolation Day** | Adds seeding installations, infestation, story sites and survivor factions from the original project. |
 
-Keep the seed, scenario and settings together when reproducing a map. Save the exported files for worlds you intend to keep across generator updates.
+**Places** sets how much of the world is settled.
+
+| Places | Result |
+| --- | --- |
+| Full world | Towns, roads, farms, facilities and resources. The default. |
+| Few places | About a third of the usual sites. |
+| Random mix (per seed) | Each kind of place gets its own share from the seed; some kinds are left out entirely. |
+| None (terrain only) | Terrain, rivers and lakes with only natural landmarks such as peaks and waterfalls. No roads, buildings or farmland. |
+
+To tone the water down, **River density** at its lowest keeps only the main rivers, and **Lakes** at 0 removes every lake, natural hollows included. **Erosion** at 0 leaves slopes without gullies.
+
+Hover over the 2D map for the position, height, slope and biome under the pointer, plus the highway, gravel road or dirt track running through it and the nearest place.
+
+Keep the seed, scenario and settings together when reproducing a map. Terrain shaping changed in this version (rivers, gullies, farmland, road beds), so a seed from an older version gives a different map. Save the exported files for worlds you intend to keep across generator updates.
 
 ## Mainland terrain
 
@@ -50,6 +63,33 @@ Choose a preset under **Terrain type → Mainland**. The terrain extends to the 
 
 **Erosion simulation** (Light or Strong) lets rivers cut into the base terrain and over-steep valley walls slump before lakes and rivers are laid out, giving branching valley networks and sharper ridges. It drains some natural hollows, so maps have fewer natural lakes. Off, the default, keeps existing maps unchanged. Grids above 505 are eroded at 505 and the change is interpolated back. **Elevation** scales vertical relief. **Erosion** controls how deeply catchment lines erode before river beds are carved. **Snow line** changes where snow appears in the biome and material layers. **Terrain scale** controls the size of terrain features. Higher values produce more closely spaced detail. The same seed and terrain controls work with **Satellite terrain**, **Topographic terrain**, and **Grayscale height** previews. Use the R16 or RAW export for full-precision engine height data. [Texturize Terrain Generator](https://texturize.app/generators/terrain)
 
+## Drawing ridges, rivers and roads
+
+Open **Draw ridges, rivers and roads**, pick a **Line type**, press **Draw new line** and click points on the 2D map. Double-click or press Enter to finish, Esc to cancel, Backspace to remove the last point. Press **Apply and regenerate** and the world is rebuilt around the lines: drainage, biomes, towns and the generated road network all respond to them.
+
+| Line type | Effect | Width | Strength |
+| --- | --- | --- | --- |
+| Ridge | Raises a crest along the line that rises and dips and tapers out at both ends. | Width of the ridge | Height: about 25 m per step on a 10 km map, 100 m per step on a 100 km map |
+| Valley | Lowers a trough. Land is never pushed below sea level. | Width of the valley | Depth, same scale as ridges |
+| River course | Cuts a steadily falling valley from the higher end of the line to the lower and feeds it water, so a river runs the whole length. From the end of the line the water finds its own way downhill. | Width of the valley | 1 to 3 stream, 4 to 7 river, 8 to 10 major river |
+| Road | Routed through the drawn points with the normal road rules (grades, bridges, tunnels) and built before the generated network, which then joins it. | Not used | 1 to 3 dirt track, 4 to 7 gravel road, 8 to 10 highway |
+
+To change a line, click it and drag its points; the Width and Strength sliders then edit the selected line. **Undo point**, **Delete selected** and **Clear all** do what they say. Lines are stored as part of the world's settings, as fractions of the map, so saved worlds and share links keep them and they survive a change of footprint or grid.
+
+A road follows the sketch where the ground allows. Across ground too steep for its class it goes round, and the panel says how far. Changing the terrain with a ridge or river also changes where towns and other sites are placed, because placement scores the new ground.
+
+## 3D view
+
+**3D view** draws the terrain with three.js on WebGPU, falling back to WebGL 2 where WebGPU is unavailable; the status line names the one in use. The mesh comes from the same pipeline as the heightmap exports (upsampled grid, added relief, river channels cut at mesh resolution, graded roads and building pads), so it shows what an engine will receive. **Mesh** sets the samples per side: 513, 1025 or 2049. Lighting comes from the mesh, so the map colours are drawn without their baked hillshade. Add `?webgl` to the page address to skip WebGPU if a graphics driver misbehaves.
+
+## Terrain shaping
+
+- **Rivers** have a flat bed as wide as the river, banks no steeper than about 1 in 5, and a depth that stays well below the width. Beds fall steadily instead of in cell-sized steps, and exports cut the channel again at export resolution from the river line, so banks come out smooth at any size.
+- **Farmland** barely changes the ground: fields lose 30% of their small bumps and keep every slope. Parcels on the map are drawn in blocks with their own heading, strip width and uneven lengths.
+- **Building pads** sit at the average ground level under the footprint and meet the ground over an apron no steeper than about 1 in 3. Neighbouring pads blend into each other.
+- **Roads** are bedded along their smoothed centreline with a shoulder, and only gullies carrying a real stream stay open under a road.
+- **Added relief** at export size fades out towards roads, streets, buildings and river channels, and is much lighter on farmland and beaches.
+
 ## River landforms
 
 **River landforms** (on by default) shapes the land along rivers:
@@ -61,7 +101,9 @@ Turn it **Off** to reproduce terrain made before this setting. **Waterfalls** ar
 
 ## Terrain compute
 
-**Auto** uses WebGPU for the base height field and small-scale terrain relief when the browser exposes a hardware adapter. The generator falls back to CPU when WebGPU is unavailable or the compute pass fails. The status line reports the backend and time spent on the base terrain pass. Drainage, rivers, roads, settlements and engine exports still run on the CPU.
+**Auto** uses WebGPU for the base height field, small-scale terrain relief and screening potential tunnels and viaducts. The CPU still validates each remaining structure candidate and chooses the route. The generator falls back to CPU when WebGPU is unavailable or a compute pass fails. **World statistics** shows both compute backends.
+
+Heightmap exports, tiles and the 3D mesh also run their per-sample work on WebGPU when compute is **Auto**: the upsample of the grid and the added relief. The export status line says which backend did it, and the result matches the CPU version to under a millimetre. The CPU handles drainage and rivers, road search and grading, settlements, resources, river cutting and dip filling at export size, because each of those steps depends on the result of the one before it. Generation is also about a fifth faster on a 1009 grid and a quarter faster on 2017 than the previous version from reworked site placement, road search bookkeeping and resource packing. The background worker handles generation when Worldforge is served over HTTP or HTTPS. The browser console reports time per generation stage.
 
 **4033** generates roughly 16.3 million samples. On a 16 km footprint, samples are about 3.97 m apart. This grid needs substantially more system memory and time, even when WebGPU is active. **8129** is an export size.
 
@@ -87,10 +129,27 @@ With a **4033** generation grid, select **Same as grid** to export native **4033
 
 ### Unreal Engine
 
-1. Export the package and open its world JSON. Read the dimensions, scale and component settings under `unreal`.
-2. In Landscape mode, import the R16 using those settings. Apply the exported location so sea level lands at Z = 0. For example, a 4033 landscape uses 63 quads per section, 2 × 2 sections per component, and 32 × 32 components.
+1. Export the package. The import values are at the top of the generated `.py` file and under `unreal` in the world JSON (`importSteps` lists them in order).
+2. In Landscape mode choose **Manage → New → Import from File** and pick the R16. Enter the exported **Location**, **Scale**, section size and component counts, with **Flip Y Axis** off. For example, a 4033 landscape uses 63 quads per section, 2 × 2 sections per component, and 32 × 32 components.
+
+   The Location is the **centre** of the map, because that panel places a landscape by its centre: a 10 km map uses `500000, 500000`. The Landscape actor then sits at `0, 0` (`actorLocation`), which is the north-west corner every exported coordinate is measured from, and sea level is Z = 0.
+
+   **Open World levels on Unreal 5.7 and 5.8:** importing a heightmap straight into a World Partition level is broken in the engine. One piece of the terrain repeats with flat ground between. Import into a **Basic** level, save it, then use **Tools → Convert Level**. Unreal 5.5 and 5.6 import directly.
 3. Create matching Landscape material layers and Layer Info assets, then import the weightmaps at the same dimensions as the heightmap. Use the PCG masks separately for placement or exclusion.
-4. To create markers and splines, enable the Python Editor Script Plugin and run the generated Python in your terrain level. Review the script header and set `SPLINE_BP` to your road Blueprint path. River setup uses the Water plugin when available. The script supplies layout data and markers for you to develop into game assets.
+4. To create markers and splines, enable the Python Editor Script Plugin, open the level with the landscape and choose **Tools → Execute Python Script**. The header of the generated file lists the steps, and a `RUN` block switches each part on or off. A summary window reports what was created and what was skipped, with the reason.
+
+   | Part | Creates |
+   | --- | --- |
+   | Landscape check | Confirms the landscape position and scale. It moves the landscape only in a plain level with a single landscape, never in a World Partition level. |
+   | Place markers | One Target Point per place, tagged with id, type, region, zone, danger and loot. |
+   | PCG volumes | A volume over each settlement and over the terrain. |
+   | Roads, streets, metro | Highways, gravel roads and dirt tracks; settlement streets; metro lines. Three separate switches. |
+   | Rivers | Plain splines, or Water plugin rivers when `USE_WATER_PLUGIN` is on. |
+   | Area outlines | Closed splines around the coast, lake shores, forest, farmland, wetland, beach, highland and snow, for PCG, landscape layers or biome tools. |
+
+   Splines use the Blueprint at `SPLINE_BP`, an Actor with one Spline component. Make it once: **Add → Blueprint Class → Actor**, name it `BP_WorldforgeSpline` in `/Game/Worldforge`, add a Spline component, compile and save. Without it the spline parts are skipped and the summary says so. The same outlines are in the world JSON under `areas`.
+
+   Rivers are plain splines by default. `USE_WATER_PLUGIN = True` makes the largest ones (`MAX_WATER_RIVERS`) real Water plugin rivers; every water body re-renders the landscape water brush and holds GPU memory, so turn it on only after the rest is in and saved. For a lighter first run, set `streets` and `area outlines` to `False` in `RUN`.
 
 [Epic's Landscape Technical Guide](https://dev.epicgames.com/documentation/unreal-engine/landscape-technical-guide-in-unreal-engine) · [Custom heightmaps and layers](https://dev.epicgames.com/documentation/unreal-engine/creating-and-using-custom-heightmaps-and-layers-in-unreal-engine)
 
@@ -124,7 +183,7 @@ For a custom Godot terrain, decode the unsigned little-endian 16-bit samples wit
 | **Vectors .geojson** | Roads (with elevation profile), bridges, viaducts, tunnels and overpasses as separate lines, rivers (bed elevation and width per vertex), streets, lakes and POIs. Coordinates are metres from the north-west corner, not geographic. |
 | **Mesh .glb / .obj** | The terrain as a triangle mesh with normals, at the selected **Mesh size**. x east, y up, z south, in metres. |
 | **Normal map .png** | World-space normal map at the export size. Green points north (OpenGL convention); flip green for Unreal. |
-| **PCG masks** | Now also includes **Scree**, loose rock on the slopes below cliffs. |
+| **PCG masks** | Now also includes **Scree**, loose rock on the slopes below cliffs, and four data maps: **Data_Slope** (white is 60° or steeper), **Data_Flow** (how much water drains through, log scale), **Data_Curvature** (grey is flat, lighter is ridges, darker is hollows) and **Data_Aspect** (north-facing black, south-facing white). |
 
 ## Saved worlds and links
 
@@ -170,8 +229,9 @@ Open `index.html` directly from the project folder. Keep the stylesheet, `js/` a
 | --- | --- |
 | `index.html` | Page structure and controls |
 | `styles.css` | Layout, theme and control styling |
-| `js/terrain.js` | World generation, WebGPU terrain, height sampling and grading |
-| `js/map.js` | 2D and 3D rendering, overlays, legends and map information |
+| `js/terrain.js` | World generation and CPU routing |
+| `js/baseterrain.js`, `js/roadcompute.js` and `js/exportcompute.js` | WebGPU base terrain, road structure screening and export-size relief |
+| `js/map.js` | 2D rendering, the three.js 3D view, overlays, legends and map information |
 | `js/exports.js` | Heightmaps, engine data, terrain tiles and import helpers |
 | `js/app.js` | Startup, control events, navigation and POI editing |
 
