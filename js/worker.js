@@ -1,6 +1,6 @@
 "use strict";
 // Runs buildWorld off the page so the UI stays responsive. Loaded by runBuild() in terrain.js when the page is served over http(s).
-importScripts('core.js', 'hydrology.js', 'baseterrain.js', 'terrain.js', 'grading.js');
+importScripts('core.js', 'hydrology.js', 'baseterrain.js', 'roadcompute.js', 'terrain.js', 'grading.js');
 
 // every typed-array buffer in the world, so they move to the page instead of being copied
 function transferables(world) {

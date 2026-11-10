@@ -6,9 +6,13 @@
 <title>Worldforge Terrain Generator</title>
 <link rel="icon" href="assets/worldforge.svg" type="image/svg+xml">
 <link rel="stylesheet" href="styles.css">
+<!-- three.js for the 3D view, loaded on first use. The WebGPU build falls back to WebGL 2 by itself. -->
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.webgpu.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"}}</script>
 <script defer src="js/core.js"></script>
 <script defer src="js/hydrology.js"></script>
 <script defer src="js/baseterrain.js"></script>
+<script defer src="js/roadcompute.js"></script>
+<script defer src="js/exportcompute.js"></script>
 <script defer src="js/terrain.js"></script>
 <script defer src="js/grading.js"></script>
 <script defer src="js/map.js"></script>
@@ -26,6 +30,9 @@
 <div class="workspace">
 <aside id="side" aria-label="World controls">
   <details class="panel" open><summary>Generate</summary><div class="panel-body">
+  <label title="One-click starting points. Picking one sets the controls below and generates; every control can still be changed afterwards."><span>Preset</span><select id="preset"><option value="">Custom</option>
+    <option value="farmland">Gentle farmland island</option><option value="alpine">Alpine island</option><option value="wild">Wild archipelago (no settlements)</option>
+    <option value="countryside">Rolling countryside</option><option value="valleys">Mountain valleys</option><option value="plateau">Dry plateaus</option><option value="cliffs">Cliff coast</option></select></label>
   <div class="seed-row"><label for="seed" title="Reuse the same seed and generation settings to recreate a world."><span>Seed</span><input type="text" id="seed" value="desolation"></label><button id="rnd" aria-label="Generate a random seed" title="Choose a random seed and generate a new world.">Roll</button></div>
   <label title="Sandbox generates a general-purpose world. Desolation Day adds story sites and alien infestation."><span>Scenario</span><select id="scenario"><option value="sandbox">Sandbox</option><option value="desolation">Desolation Day</option></select></label>
   <label title="Physical width and length of the whole map, including any water."><span>Footprint</span><select id="fp">
@@ -37,18 +44,31 @@
     <option value="hook">Hooked coast</option><option value="inlets">Mountain inlets</option><option value="headlands">Asymmetric headlands</option></optgroup>
     <optgroup label="Mainland"><legend>Mainland</legend><option value="rolling">Rolling hills</option><option value="mountainous">Mountainous valleys</option><option value="plateaus">Stepped plateaus</option><option value="coastal">Coastal cliffs</option></optgroup></select></label>
   <label title="Samples per side in the terrain simulation. The 4033 grid uses substantially more system memory and takes longer, including with WebGPU."><span>Grid</span><select id="size"><option value="505">505 (quick preview)</option><option value="1009" selected>1009 (balanced)</option><option value="2017">2017 (high detail, slower)</option><option value="4033">4033 (very high detail)</option></select></label>
-  <label title="Auto uses WebGPU for base terrain when available. Choose CPU to reproduce older maps."><span>Terrain compute</span><select id="compute"><option value="auto">Auto (WebGPU)</option><option value="cpu">CPU</option></select></label>
+  <label title="Auto uses WebGPU for base terrain and road structure screening when available. Choose CPU to reproduce older maps."><span>Terrain compute</span><select id="compute"><option value="auto">Auto (WebGPU)</option><option value="cpu">CPU</option></select></label>
   <label title="Strength of mountain ridges. Elevation separately scales the whole height field."><span>Mountains</span><input id="mtn" type="range" min=".6" max="1.5" step=".05" value="1"></label>
-  <label title="Target number of carved lake basins. Natural lakes may also form where water collects."><span>Lakes</span><input id="lakes" type="range" min="0" max="12" step="1" value="6"></label>
-  <label title="Higher values draw streams from smaller drainage catchments."><span>River density</span><input id="riv" type="range" min=".5" max="2" step=".1" value="1"></label>
+  <label title="Target number of carved lake basins. Natural lakes may also form where water collects. At 0 there are no lakes at all."><span>Lakes</span><input id="lakes" type="range" min="0" max="12" step="1" value="6"></label>
+  <label title="Higher values draw streams from smaller drainage catchments. The lowest setting keeps only the main rivers."><span>River density</span><input id="riv" type="range" min=".1" max="2" step=".1" value="1"></label>
   <label title="Scales vertical relief across the map, including offshore depths."><span>Elevation</span><input id="elevation" type="range" min="0" max="1" step=".01" value=".5"></label>
-  <label title="Controls how deeply drainage channels erode before the river beds are carved."><span>Erosion</span><input id="erosion" type="range" min="0" max="1" step=".01" value=".3"></label>
+  <label title="How deeply small drainage lines cut gullies into slopes. 0 leaves the slopes uncut."><span>Erosion</span><input id="erosion" type="range" min="0" max="1" step=".01" value=".2"></label>
   <label title="Raises or lowers the elevation where the snow biome and snow material begin."><span>Snow line</span><input id="snowLine" type="range" min="0" max="1" step=".01" value=".8"></label>
   <label title="Controls the spacing of terrain features. Higher values place details closer together."><span>Terrain scale</span><input id="terrainScale" type="range" min=".005" max=".03" step=".001" value=".01"></label>
   <label title="Deltas where large rivers meet the sea, and flat floodplains along lowland rivers. Turn off to reproduce maps made before river landforms."><span>River landforms</span><select id="landforms"><option value="on">On (deltas, floodplains)</option><option value="off">Off</option></select></label>
   <label title="Simulates rivers cutting into the base terrain and over-steep valley walls slumping, before lakes and rivers are laid out. Off reproduces maps made without it."><span>Erosion simulation</span><select id="hydraulic"><option value="off">Off</option><option value="light">Light</option><option value="strong">Strong (deep valleys)</option></select></label>
+  <label title="How much of the world is settled. Full builds towns, roads, farms and facilities. None leaves the terrain, rivers and lakes with only natural landmarks."><span>Places</span><select id="pois"><option value="full">Full world</option><option value="few">Few places</option><option value="random">Random mix (per seed)</option><option value="none">None (terrain only)</option></select></label>
   <button class="go" id="gen" title="Generate a world with the current settings. This clears manual POI moves.">Generate terrain</button>
   <button id="cancelGen" hidden title="Stop the generation in progress. The previous world stays on screen.">Cancel</button>
+  </div></details>
+
+  <details class="panel" id="drawPanel"><summary>Draw ridges, rivers and roads</summary><div class="panel-body">
+  <p class="hint" id="spHelp">Sketch lines on the 2D map, then regenerate: the world is rebuilt around them.</p>
+  <label title="What the next line you draw will be. Ridges raise a crest, valleys lower a trough, rivers cut a course that water follows, roads are routed along the line."><span>Line type</span><select id="spType"><option value="ridge">Ridge (raise)</option><option value="valley">Valley (lower)</option><option value="river">River course</option><option value="road">Road</option></select></label>
+  <label title="How wide the ridge, valley or river valley is. Roads ignore this."><span>Width</span><input id="spWidth" type="range" min="100" max="3000" step="50" value="500"></label>
+  <label title="Ridge height or valley depth; river size (stream, river, major river); road class (dirt track, gravel road, highway)."><span>Strength</span><input id="spAmount" type="range" min="1" max="10" step="1" value="5"></label>
+  <div id="spInfo" class="hint" aria-live="polite"></div>
+  <div class="row"><button id="spDraw" title="Start a new line: click on the map to add points, double-click or press Enter to finish, Esc to cancel, Backspace to remove the last point.">Draw new line</button><button id="spUndo" title="Remove the last point of the line being drawn, or the last point of the selected line.">Undo point</button></div>
+  <label hidden title="Click a line to select it and drag its points to move them. The Width and Strength sliders then change the selected line."><input type="checkbox" id="spEdit" checked><span>Select lines and drag points</span></label>
+  <div class="row"><button id="spDelete" title="Delete the selected line.">Delete selected</button><button id="spClear" title="Remove every drawn line.">Clear all</button></div>
+  <button class="secondary full" id="spApply" title="Generate the world again with the drawn lines shaping it.">Apply and regenerate</button>
   </div></details>
 
   <details class="panel"><summary>Saved worlds</summary><div class="panel-body">
@@ -113,11 +133,16 @@
 </aside>
 <main id="main" aria-label="Terrain map">
   <div id="bar"><button class="secondary" id="v3d" title="Switch between the 2D map and 3D terrain preview.">3D view</button>
-    <span id="c3d" hidden>Height ×<input id="ex3d" type="range" aria-label="Height exaggeration" title="Exaggerate terrain height in the 3D preview. A value of 1 keeps true scale." min="1" max="4" step=".25" value="1"><span id="ex3dL">1 (true scale)</span></span>
+    <span id="c3d" hidden>Height ×<input id="ex3d" type="range" aria-label="Height exaggeration" title="Exaggerate terrain height in the 3D preview. A value of 1 keeps true scale." min="1" max="4" step=".25" value="1"><span id="ex3dL">1 (true scale)</span> Mesh<select id="q3d" aria-label="3D mesh detail" title="Samples per side of the 3D terrain mesh. It is built by the same pipeline as the heightmap exports."><option value="513">513</option><option value="1025" selected>1025</option><option value="2049">2049 (heavy)</option></select></span>
     <button id="zOut" aria-label="Zoom out" title="Zoom out on the 2D map.">−</button><span id="zLab">100%</span><button id="zIn" aria-label="Zoom in" title="Zoom in on the 2D map.">+</button><button id="zFit" title="Fit the 2D map to the viewport.">Fit</button>
     <div id="hover">Scroll to zoom · drag to pan</div>
     <div id="status" role="status"></div>
+    <div id="prog" hidden>
+      <label><span id="pgAllL">Overall</span><progress id="pgAll" max="1" value="0"></progress></label>
+      <label><span id="pgItemL">Step</span><progress id="pgItem"></progress></label>
+    </div>
   </div>
+  <input type="hidden" id="splines" value="">
   <canvas id="cv"></canvas>
   <canvas id="ov"></canvas>
   <div id="box3d" hidden></div>

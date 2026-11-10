@@ -127,14 +127,22 @@ function updateMapLegend(mode) {
   panel.hidden = false;
 }
 
-function render() {
-  if (!S) return;
-  const { n, k, h, ocean, lakeId, lakes, land, biome, slope, shade, zone, region, stageT, urban, cell, cstep } = S, W = n * k, mode = $('mode').value;
-  updateMapControls();
-  updateMapLegend(mode);
+// field parcels as drawn on the map (colour only; fields do not shape the terrain). Land is split into blocks about seven
+// plots across; each block has its own heading and strip width, strips are cut into uneven lengths, and every boundary
+// wanders a little, so the patchwork reads as surveyed parcels rather than one square grid laid over the whole map.
+function fieldHash(x, y, fs) {
+  const B = fs * 7, bx = Math.floor((x + .3 * B * Math.sin(y / B * 1.9)) / B), by = Math.floor((y + .3 * B * Math.sin(x / B * 2.3 + 1)) / B);
+  const a = hsh2(bx, by) * 3.1416, c = Math.cos(a), s = Math.sin(a), wide = .6 + 1.6 * hsh2(bx + 17, by - 5);
+  const wx = x + .35 * fs * Math.sin(y / (fs * 1.3) + bx), wy = y + .35 * fs * Math.sin(x / (fs * 1.7) + by);
+  const u = Math.floor((wx * c + wy * s) / (fs * wide)), v = Math.floor((wy * c - wx * s) / (fs * (1.1 + 1.2 * hsh2(u + bx * 31, by))));
+  return hsh2(u * 7 + bx * 131, v * 13 + by * 71);
+}
+// the map colours for a mode as an n × n canvas. shaded = false leaves out the baked hillshade (the 3D view lights the
+// terrain itself, so shading it twice would double every shadow)
+function paintBase(mode, shaded = true) {
+  const { n, h, ocean, lakeId, lakes, land, biome, slope, shade, zone, region, stageT, urban, cell, cstep } = S;
   const cont = $('oCont').checked || mode === 'topographic', fs = Math.max(160, cell * 3) / cell, fc = Math.cos(.5), fsn = Math.sin(.5);   // same plots the generator levels
   const materials = mode === 'materials' ? layerFields(S) : null;
-  cv.width = cv.height = W;
   const off = document.createElement('canvas'); off.width = off.height = n;
   const octx = off.getContext('2d'), img = octx.createImageData(n, n), d = img.data;
   const mix = (c, o, t) => o ? [c[0] * (1 - t) + o[0] * t, c[1] * (1 - t) + o[1] * t, c[2] * (1 - t) + o[2] * t] : c;
@@ -169,7 +177,7 @@ function render() {
       if (mode === 'terrain') {             // land cover on top of the elevation tint
         const b = biome[i], x = i % n, y = i / n | 0;
         if (b === 3) c = mix(c, [34, 72, 40], .5 + .25 * hsh(i));
-        else if (b === 9) c = mix(c, FIELD[(hsh2(Math.floor((x * fc + y * fsn) / fs), Math.floor((y * fc - x * fsn) / fs)) * 4) | 0], .55);
+        else if (b === 9) { const f = fieldHash(x, y, fs); c = mix(c, FIELD[(f * 4) | 0], .3 + .2 * ((f * 37) % 1)); }
         else if (b === 7) c = mix(c, [78, 122, 108], .5);
         if (urban[i]) c = mix(c, urban[i] === 2 ? [150, 146, 140] : [168, 160, 146], .5);
       }
@@ -182,7 +190,7 @@ function render() {
       if (mode === 'zones') c = mix(c, ZONE_COL[zone[i]], .5);
       if (mode === 'regions') c = mix(c, REGION_COL[region[i]], .6);
       if (mode === 'ecology') c = mix([c[0] * .8, c[1] * .8, c[2] * .8], STAGE_COL[stageT[i]], .4 + .15 * stageT[i]);
-      let m = clamp(shade[i], .45, 1.5);
+      let m = shaded ? clamp(shade[i], .45, 1.5) : 1;
       if (cont) {
         const q = Math.floor(h[i] / cstep);
         if ((i % n < n - 1 && q !== Math.floor(h[i + 1] / cstep)) || (i + n < h.length && q !== Math.floor(h[i + n] / cstep))) m *= q % 5 === 0 ? .5 : .72;
@@ -192,14 +200,24 @@ function render() {
     d[4 * i] = c[0]; d[4 * i + 1] = c[1]; d[4 * i + 2] = c[2]; d[4 * i + 3] = 255;
   }
   octx.putImageData(img, 0, 0);
-  cx2.imageSmoothingEnabled = true; cx2.drawImage(off, 0, 0, W, W);
+  return off;
+}
+function render() {
+  if (!S) return;
+  const W = S.n * S.k, mode = $('mode').value;
+  updateMapControls();
+  updateMapLegend(mode);
+  cv.width = cv.height = W;
+  cx2.imageSmoothingEnabled = true; cx2.drawImage(paintBase(mode), 0, 0, W, W);
   renderOverlay();
   if (V3.on) build3D();
 }
 
-// ---------- 3D view (three.js, loaded on first use) ----------
+// ---------- 3D view (three.js WebGPU renderer, loaded on first use) ----------
+// The terrain mesh is built from the same pipeline as the heightmap exports (upsampled grid, added relief, rivers cut at
+// mesh resolution, graded roads and building pads), so what is on screen is what an engine receives. three.js draws it
+// with WebGPU and falls back to WebGL 2 by itself where WebGPU is not available.
 const V3 = { on: false };
-const loadJs = src => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Could not load ' + src)); document.head.appendChild(s); });
 function place3D() {
   const m = mainEl.getBoundingClientRect(), top = $('bar').getBoundingClientRect().bottom, box = $('box3d');
   Object.assign(box.style, { left: m.left + 'px', top: top + 'px', width: m.width + 'px', height: m.bottom - top + 'px' });
@@ -216,48 +234,101 @@ async function toggle3D() {
   };
   setView(!V3.on);
   if (!V3.on) return;
-  if (!window.THREE) {
+  if (!V3.T) {
     $('status').textContent = 'Loading 3D engine…';
-    try { await loadJs('https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'); await loadJs('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js'); }
-    catch (e) { $('status').textContent = e.message + ' (3D view needs an internet connection once)'; setView(false); return; }
+    try {
+      // 'three' and 'three/addons/' are mapped to the CDN build by the import map in index.html
+      V3.T = await import('three');
+      V3.Orbit = (await import('three/addons/controls/OrbitControls.js')).OrbitControls;
+    } catch (e) { V3.T = null; console.error(e); $('status').textContent = 'Could not load the 3D engine (the 3D view needs an internet connection once)'; setView(false); return; }
   }
   if (!V3.renderer) {
-    const r = V3.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true }); r.setPixelRatio(devicePixelRatio || 1); $('box3d').appendChild(r.domElement);
-    V3.scene = new THREE.Scene(); V3.camera = new THREE.PerspectiveCamera(50, 1, 2, 1e6);
-    V3.controls = new THREE.OrbitControls(V3.camera, r.domElement); V3.controls.enableDamping = true; V3.controls.maxPolarAngle = Math.PI * .49;
-    const loop = () => { requestAnimationFrame(loop); if (V3.on) { V3.controls.update(); r.render(V3.scene, V3.camera); } }; loop();
+    const T = V3.T;
+    try {
+      // add ?webgl to the page address to skip WebGPU for the 3D view (a troubleshooting switch for unstable drivers)
+      const r = new T.WebGPURenderer({ antialias: true, logarithmicDepthBuffer: true, forceWebGL: /[?&]webgl\b/.test(location.search) });
+      await r.init();
+      V3.renderer = r; V3.backend = r.backend && r.backend.isWebGPUBackend ? 'WebGPU' : 'WebGL 2';
+    } catch (e) { console.error(e); $('status').textContent = '3D view could not start: ' + e.message; setView(false); return; }
+    const r = V3.renderer; r.setPixelRatio(Math.min(2, devicePixelRatio || 1)); $('box3d').appendChild(r.domElement);
+    V3.scene = new T.Scene(); V3.camera = new T.PerspectiveCamera(50, 1, 2, 1e6);
+    V3.controls = new V3.Orbit(V3.camera, r.domElement); V3.controls.enableDamping = true; V3.controls.maxPolarAngle = Math.PI * .495;
   }
-  place3D(); build3D(true);
-  $('status').textContent = '3D view: drag to orbit, right-drag to pan, scroll to zoom';
+  place3D(); await build3D(true);
+  // the frame loop starts only once the canvas has its size and the scene is built
+  if (!V3.looping) { V3.looping = true; V3.renderer.setAnimationLoop(() => { if (V3.on) { V3.controls.update(); V3.renderer.render(V3.scene, V3.camera); } }); }
+  if (V3.on) $('status').textContent = `3D view (${V3.backend}, ${V3.meshN} × ${V3.meshN} mesh from the export pipeline): drag to orbit, right-drag to pan, scroll to zoom`;
 }
-function build3D(resetCam) {
-  if (!S || !window.THREE || !V3.renderer) return;
-  const { scene, camera, controls } = V3, size = S.sizeM, half = size / 2, ex = +$('ex3d').value, seg = Math.min(S.n - 1, 640);
+// heights for the 3D mesh: N × N samples straight from the export pipeline, cached per world
+async function heights3D(N) {
+  if (V3.hWorld === S && V3.hN === N) return V3.h;
+  const H = N === S.n ? gradeSites(S.h.slice(), N, S) : gradeSites(await buildHeightWindowFast(S, N), N, S);
+  V3.hWorld = S; V3.hN = N; return V3.h = H;
+}
+// terrain geometry with analytic normals (central differences on the height samples)
+function terrainGeometry3D(T, H, N, size, ex) {
+  const pos = new Float32Array(N * N * 3), nor = new Float32Array(N * N * 3), uv = new Float32Array(N * N * 2), idx = new Uint32Array((N - 1) * (N - 1) * 6);
+  const pitch = size / (N - 1), half = size / 2;
+  for (let j = 0, v = 0; j < N; j++) for (let i = 0; i < N; i++, v++) {
+    const o = v * 3; pos[o] = i * pitch - half; pos[o + 1] = H[v] * ex; pos[o + 2] = j * pitch - half;
+    const l = H[v - (i > 0)], r = H[v + (i < N - 1)], u = H[v - (j > 0 ? N : 0)], d = H[v + (j < N - 1 ? N : 0)];
+    const gx = (r - l) * ex / (((i > 0) + (i < N - 1)) * pitch), gz = (d - u) * ex / (((j > 0) + (j < N - 1)) * pitch), inv = 1 / Math.hypot(gx, 1, gz);
+    nor[o] = -gx * inv; nor[o + 1] = inv; nor[o + 2] = -gz * inv;
+    uv[v * 2] = i / (N - 1); uv[v * 2 + 1] = 1 - j / (N - 1);
+  }
+  for (let j = 0, q = 0; j < N - 1; j++) for (let i = 0; i < N - 1; i++) {
+    const a = j * N + i, b = a + 1, c = a + N, d = c + 1;
+    idx[q++] = a; idx[q++] = c; idx[q++] = b; idx[q++] = b; idx[q++] = c; idx[q++] = d;
+  }
+  const geo = new T.BufferGeometry();
+  geo.setAttribute('position', new T.BufferAttribute(pos, 3)); geo.setAttribute('normal', new T.BufferAttribute(nor, 3));
+  geo.setAttribute('uv', new T.BufferAttribute(uv, 2)); geo.setIndex(new T.BufferAttribute(idx, 1));
+  return geo;
+}
+// lake surfaces: one flat sheet per lake at its water level, reaching one sample under the shore so no gap shows
+function lakeGeometry3D(T, N, size, ex) {
+  const { n, lakeId, lakes } = S, f = (n - 1) / (N - 1), lvl = new Float32Array(N * N).fill(NaN), pitch = size / (N - 1), half = size / 2;
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) { const id = lakeId[Math.round(j * f) * n + Math.round(i * f)]; if (id) lvl[j * N + i] = lakes[id - 1].level; }
+  const wide = lvl.slice();
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) { const v = j * N + i; if (lvl[v] === lvl[v]) continue;
+    for (let d = 0; d < 8; d++) { const x = i + DX[d], y = j + DY[d]; if (x < 0 || y < 0 || x >= N || y >= N) continue; const w = lvl[y * N + x]; if (w === w) { wide[v] = w; break; } } }
+  const slot = new Int32Array(N * N).fill(-1), pos = [], idx = [];
+  const vert = v => { if (slot[v] < 0) { slot[v] = pos.length / 3; pos.push((v % N) * pitch - half, wide[v] * ex, (v / N | 0) * pitch - half); } return slot[v]; };
+  for (let j = 0; j < N - 1; j++) for (let i = 0; i < N - 1; i++) {
+    const a = j * N + i, b = a + 1, c = a + N, d = c + 1; if (!(wide[a] === wide[b] && wide[a] === wide[c] && wide[a] === wide[d])) continue;   // NaN never equals itself
+    idx.push(vert(a), vert(c), vert(b), vert(b), vert(c), vert(d));
+  }
+  if (!idx.length) return null;
+  const geo = new T.BufferGeometry();
+  geo.setAttribute('position', new T.Float32BufferAttribute(pos, 3)); geo.setIndex(idx); geo.computeVertexNormals();
+  return geo;
+}
+async function build3D(resetCam) {
+  if (!S || !V3.T || !V3.renderer) return;
+  const T = V3.T, { scene, camera, controls } = V3, size = S.sizeM, half = size / 2, ex = +$('ex3d').value, N = +$('q3d').value || 1025, world = S;
+  if (V3.hWorld !== S || V3.hN !== N) { $('status').textContent = `Building the ${N} × ${N} terrain mesh…`; await new Promise(r => setTimeout(r, 20)); if (S !== world || !V3.on) return; }
+  const H = await heights3D(N); if (S !== world || !V3.on) return; V3.meshN = N;
   scene.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); } });
   scene.clear();
-  const sky = new THREE.Color(0x8a9aa6); scene.background = sky; scene.fog = new THREE.Fog(sky, size * .35, size * 1.6);   // grounded, foggy mood (Game_Concept.md)
-  scene.add(new THREE.HemisphereLight(0xdde6ee, 0x3a3428, .75));
-  const sun = new THREE.DirectionalLight(0xfff1dc, .85); sun.position.set(-size * .6, size * .7, -size * .4); scene.add(sun);
-  // terrain texture = the current 2D map (any mode) plus rivers/roads/buildings, without symbols
-  const tc = document.createElement('canvas'); tc.width = tc.height = cv.width; const tx = tc.getContext('2d'); tx.drawImage(cv, 0, 0);
+  const sky = new T.Color(0x9fb4c4); scene.background = sky; scene.fog = new T.Fog(sky, size * .6, size * 2.4);
+  scene.add(new T.HemisphereLight(0xdfeaf5, 0x4a4436, 1.5));
+  const sun = new T.DirectionalLight(0xfff0d8, 2.6); sun.position.set(-size * .6, size * .55, -size * .45); scene.add(sun);
+  // terrain texture = the current map mode without its baked hillshade, plus rivers, roads and buildings (no symbols)
+  const base = S.n * S.k, tk = base <= 2048 ? 2 : 1, tc = document.createElement('canvas'); tc.width = tc.height = base * tk;
+  const tx = tc.getContext('2d'); tx.imageSmoothingEnabled = true; tx.scale(tk, tk); tx.drawImage(paintBase($('mode').value, false), 0, 0, base, base);
   const q0 = ovQ, poi = $('oPoi').checked, sl = $('oSlice').checked; ovQ = -1; $('oPoi').checked = false; $('oSlice').checked = false;   // -1: true widths, 1 px floor
   drawOverlays(tx); ovQ = q0; $('oPoi').checked = poi; $('oSlice').checked = sl;
-  const tex = new THREE.CanvasTexture(tc); tex.anisotropy = V3.renderer.capabilities.getMaxAnisotropy();
-  // terrain mesh: lakes shown flat at their water level, ocean floor kept for the shallows
-  const geo = new THREE.PlaneGeometry(size, size, seg, seg); geo.rotateX(-Math.PI / 2);
-  const pos = geo.attributes.position, { n, cell, lakeId, lakes } = S;
-  const ground = (xm, ym) => { const gi = Math.min(n - 1, Math.round(ym / cell)) * n + Math.min(n - 1, Math.round(xm / cell)); return lakeId[gi] ? lakes[lakeId[gi] - 1].level : hAt(xm, ym); };
-  const surface = new Float32Array((seg + 1) ** 2);
-  for (let j = 0; j <= seg; j++) for (let i = 0; i <= seg; i++) surface[j * (seg + 1) + i] = ground(i / seg * size, j / seg * size);
-  gradeSites(surface, seg + 1, S);
-  for (let i = 0; i < surface.length; i++) pos.setY(i, surface[i] * ex);
-  geo.computeVertexNormals();
-  scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex })));
+  const tex = new T.CanvasTexture(tc); tex.colorSpace = T.SRGBColorSpace; tex.anisotropy = 8;
+  scene.add(new T.Mesh(terrainGeometry3D(T, H, N, size, ex), new T.MeshLambertMaterial({ map: tex })));
+  const water = { color: 0x2f6f95, transparent: true, opacity: .78, shininess: 90, specular: 0x8899aa };
+  const lakeGeo = lakeGeometry3D(T, N, size, ex);
+  if (lakeGeo) scene.add(new T.Mesh(lakeGeo, new T.MeshPhongMaterial(water)));
   if (!S.mainland || S.shape === 'coastal') {
     const seaSize = S.mainland ? size : size * 6;
-    const sea = new THREE.Mesh(new THREE.PlaneGeometry(seaSize, seaSize), new THREE.MeshPhongMaterial({ color: 0x24506e, transparent: true, opacity: .72, shininess: 80 }));
+    const sea = new T.Mesh(new T.PlaneGeometry(seaSize, seaSize), new T.MeshPhongMaterial({ ...water, color: 0x24506e }));
     sea.rotation.x = -Math.PI / 2; sea.position.y = 0; scene.add(sea);
   }
+  const { cell } = S;
   if ($('oRoad').checked) {
     const vertices = [];
     for (const road of S.roads) if (road.deck && road.profile) {
@@ -277,30 +348,31 @@ function build3D(resetCam) {
       }
     }
     if (vertices.length) {
-      const decks = new THREE.BufferGeometry();
-      decks.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3)); decks.computeVertexNormals();
-      scene.add(new THREE.Mesh(decks, new THREE.MeshLambertMaterial({ color: 0xb1a18a, side: THREE.DoubleSide })));
+      const decks = new T.BufferGeometry();
+      decks.setAttribute('position', new T.Float32BufferAttribute(vertices, 3)); decks.computeVertexNormals();
+      scene.add(new T.Mesh(decks, new T.MeshLambertMaterial({ color: 0xb1a18a, side: T.DoubleSide })));
     }
   }
   if ($('oMetro').checked) {
     for (const link of S.metro) {
-      const points = link.points.map(([x, y, z]) => new THREE.Vector3(x - half, z * ex, y - half));
-      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points),
-        new THREE.LineDashedMaterial({ color: 0x67d9ee, dashSize: 16, gapSize: 10, depthTest: false, depthWrite: false, transparent: true, fog: false }));
+      const points = link.points.map(([x, y, z]) => new T.Vector3(x - half, z * ex, y - half));
+      const line = new T.Line(new T.BufferGeometry().setFromPoints(points),
+        new T.LineDashedMaterial({ color: 0x67d9ee, dashSize: 16, gapSize: 10, depthTest: false, depthWrite: false, transparent: true, fog: false }));
       line.computeLineDistances();
       line.renderOrder = 8;
       scene.add(line);
     }
   }
-  // buildings as one instanced mesh
+  // buildings as one instanced mesh, standing on their graded pads
   if ($('oBld').checked && S.buildings.length) {
     const HT = { house: 6, shop: 7, apartment: 16, commercial: 24, civic: 10, industrial: 9, military: 6, farm: 6, park: .3, cemetery: .3 };
-    const im = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial(), S.buildings.length), m4 = new THREE.Matrix4(), qt = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), col = new THREE.Color();
+    const im = new T.InstancedMesh(new T.BoxGeometry(1, 1, 1), new T.MeshLambertMaterial(), S.buildings.length), m4 = new T.Matrix4(), qt = new T.Quaternion(), up = new T.Vector3(0, 1, 0), col = new T.Color();
     S.buildings.forEach((b, j) => {
       const hgt = (HT[b.kind] || 6) * (.8 + .4 * hsh(j));
-      m4.compose(new THREE.Vector3(b.x - half, b.z * ex + hgt / 2, b.y - half), qt.setFromAxisAngle(up, -b.a), new THREE.Vector3(b.w, hgt, b.d));
+      m4.compose(new T.Vector3(b.x - half, b.z * ex + hgt / 2, b.y - half), qt.setFromAxisAngle(up, -b.a), new T.Vector3(b.w, hgt, b.d));
       im.setMatrixAt(j, m4); im.setColorAt(j, col.set(BLD_COL[b.kind] || '#999'));
     });
+    im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true;
     scene.add(im);
   }
   // labels for the main places, constant screen size
@@ -309,14 +381,18 @@ function build3D(resetCam) {
     const c = document.createElement('canvas'), g = c.getContext('2d'); g.font = '600 28px system-ui'; const tw = g.measureText(p.name).width + 46;
     c.width = tw; c.height = 44; g.font = '600 28px system-ui'; g.fillStyle = 'rgba(10,12,16,.7)'; g.fillRect(0, 0, tw, 44);
     g.fillStyle = POI_STYLE[key][1]; g.beginPath(); g.arc(20, 22, 11, 0, 6.2832); g.fill(); g.fillStyle = '#fff'; g.textBaseline = 'middle'; g.fillText(p.name, 38, 23);
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), sizeAttenuation: false, depthTest: false }));
-    sp.scale.set(.035 * tw / 44, .035, 1); sp.center.set(0, 0); sp.position.set(p.x * cell - half, hAt(p.x * cell, p.y * cell) * ex + size * .004, p.y * cell - half); sp.renderOrder = 10; scene.add(sp);
+    const lt = new T.CanvasTexture(c); lt.colorSpace = T.SRGBColorSpace;
+    const sp = new T.Sprite(new T.SpriteMaterial({ map: lt, sizeAttenuation: false, depthTest: false, fog: false }));
+    sp.scale.set(.027 * tw / 44, .027, 1); sp.center.set(0, 0); sp.position.set(p.x * cell - half, hAt(p.x * cell, p.y * cell) * ex + size * .004, p.y * cell - half); sp.renderOrder = 10; scene.add(sp);
   }
-  if (resetCam || !V3.placed) { camera.position.set(0, size * .55, size * .78); controls.target.set(0, 0, 0); camera.far = size * 8; camera.updateProjectionMatrix(); V3.placed = true; }
+  if (resetCam || !V3.placed) { camera.position.set(0, size * .55, size * .78); controls.target.set(0, 0, 0); camera.near = Math.max(1, size / 20000); camera.far = size * 8; camera.updateProjectionMatrix(); V3.placed = true; }
 }
 $('v3d').onclick = () => toggle3D();
 $('ex3d').oninput = () => { $('ex3dL').textContent = +$('ex3d').value === 1 ? '1 (true scale)' : $('ex3d').value + ' (exaggerated)'; clearTimeout(V3.t); V3.t = setTimeout(() => build3D(), 120); };
+$('q3d').onchange = () => build3D().then(() => { if (V3.on) $('status').textContent = `3D view (${V3.backend}, ${V3.meshN} × ${V3.meshN} mesh)`; });
 addEventListener('resize', () => V3.on && place3D());
+// the bar above the view changes height with its status and hover text: keep the 3D canvas exactly below it
+if (typeof ResizeObserver !== 'undefined' && $('bar').nodeType === 1) new ResizeObserver(() => V3.on && place3D()).observe($('bar'));
 // vector layer, in base-canvas units; drawn onto the screen-resolution overlay (and onto the Map .png export)
 function drawOverlays(cx2) {
   const { n, k, cell, urban } = S, W = n * k;
@@ -420,6 +496,7 @@ function renderOverlay() {
   const r = cv.getBoundingClientRect(), s = r.width / cv.width * dpr; ovQ = r.width / cv.width;
   ovx.setTransform(s, 0, 0, s, (r.left - m.left) * dpr, (r.top - top) * dpr);
   drawOverlays(ovx);
+  if (typeof drawUserSplines === 'function') drawUserSplines(ovx);
   ovx.setTransform(dpr, 0, 0, dpr, 0, 0); drawScaleBar(ovx, S.cell / S.k / ovQ, 14, h - 14, 1);
 }
 // scale bar: picks a round 1/2/5 length near 140 px; mpp = metres per drawn px
@@ -459,7 +536,7 @@ function updateInfo() {
     .map(p => `  ${p.name} – ${(Math.hypot(p.x - st.x, p.y - st.y) * S.cell).toFixed(0)} m`).join('\n') : '';
   $('stats').textContent =
     `Shape     ${S.shape}\nTerrain   ${S.terrainBackend === 'webgpu' ? 'WebGPU' : 'CPU'} · ${S.terrainSeconds.toFixed(2)} s\nFootprint ${fk}×${fk} km = ${(fk * fk).toFixed(0)} km²\nLand      ${s.landKm2.toFixed(0)} km² (${(100 * s.landKm2 / (fk * fk)).toFixed(0)}% of footprint)\nPeak      ${s.peak.toFixed(0)} m\n` +
-    `Lakes     ${S.lakes.length}${big ? ` (largest ${big.area.toFixed(2)} km²)` : ''}\nRivers    ${s.riverKm.toFixed(0)} km channel\nRoads     ${S.roads.length} routes\nCell size ${S.cell.toFixed(1)} m\n\n` +
+    `Lakes     ${S.lakes.length}${big ? ` (largest ${big.area.toFixed(2)} km²)` : ''}\nRivers    ${s.riverKm.toFixed(0)} km channel\nRoads     ${S.roads.length} routes\nStructure screening ${S.roadScreeningBackend === 'webgpu' ? 'WebGPU' : 'CPU'}\nCell size ${S.cell.toFixed(1)} m\n\n` +
     'Regions\n' + REGION_NAME.slice(1).map((r, j) => `  ${r.padEnd(20)}${pct(s.regCnt[j + 1])}`).join('\n') +
     (S.scenario === 'desolation' ? '\n\nInfestation (start)\n' + STAGE_NAME.map((r, j) => `  ${r.padEnd(20)}${pct(s.stageCnt[j])}`).join('\n') : '') +
     '\n\n' + Object.entries(c).map(([k, v]) => `${k.padEnd(12)}${v}`).join('\n') +
@@ -510,8 +587,19 @@ cv.addEventListener('mousemove', e => {
   if (!S) return; const r = cv.getBoundingClientRect(), x = Math.floor((e.clientX - r.left) / r.width * S.n), y = Math.floor((e.clientY - r.top) / r.height * S.n);
   if (x < 0 || y < 0 || x >= S.n || y >= S.n) return; const i = y * S.n + x;
   $('hover').textContent = `${(x * S.cell / 1000).toFixed(2)}, ${(y * S.cell / 1000).toFixed(2)} km  ·  ${S.h[i].toFixed(0)} m  ·  slope ${S.slope[i].toFixed(0)}°  ·  ${BN[S.biome[i]]}` +
-    (S.land[i] ? `  ·  ${REGION_NAME[S.region[i]]}  ·  ${STAGE_NAME[S.stageT[i]]}` : '') + (S.riv[i] ? ' · river' : '') + nearPoi(x, y, 10 / (r.width / S.n));
+    (S.land[i] ? `  ·  ${REGION_NAME[S.region[i]]}  ·  ${STAGE_NAME[S.stageT[i]]}` : '') + (S.riv[i] ? ' · river' : '') + roadAt(i) + nearPoi(x, y, 10 / (r.width / S.n));
 });
+// which road, gravel road or dirt track runs through (or right beside) a cell, for the hover line
+const ROAD_LABEL = { highway: 'Highway (paved)', road: 'Gravel road', trail: 'Dirt track' };
+function roadAt(i) {
+  if (S.roadIdx === undefined) {
+    const n = S.n, idx = S.roadIdx = new Int16Array(n * n).fill(-1), order = { trail: 0, road: 1, highway: 2 };
+    for (const type of ['trail', 'road', 'highway']) S.roads.forEach((r, k) => { if (r.type !== type) return;       // wider roads win where they share ground
+      for (const c of r.path) { const x = c % n; for (let d = -1; d <= 1; d++) for (let e = -1; e <= 1; e++) { const j = c + d * n + e; if (j >= 0 && j < n * n && Math.abs((j % n) - x) <= 1) idx[j] = k; } } });
+  }
+  const r = S.roads[S.roadIdx[i]]; if (!r) return '';
+  return `  ·  ${ROAD_LABEL[r.type] || r.type}${r.a && r.b ? `: ${r.a} – ${r.b}` : ''}${r.len ? ` (${(r.len / 1000).toFixed(1)} km)` : ''}`;
+}
 function nearPoi(x, y, thr) {
   let best = null, bd = thr; for (const p of S.pois) { const d = Math.hypot(p.x - x, p.y - y); if (d < bd && p.type !== 'bridge') { bd = d; best = p; } }
   return best ? `  ·  ▸ ${best.name || best.type}` : '';

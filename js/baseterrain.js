@@ -179,7 +179,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 let terrainCompute;
 async function initTerrainCompute() {
   const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter || adapter.info?.isFallbackAdapter) return null;
+  // a software (fallback) adapter is slower than the CPU path, so it is refused unless the page address has ?softgpu (testing)
+  if (!adapter || (adapter.info?.isFallbackAdapter && !/[?&]softgpu\b/.test(globalThis.location?.search || ''))) return null;
   const device = await adapter.requestDevice();
   try {
     const module = device.createShaderModule({ code: TERRAIN_SHADER });
@@ -191,26 +192,18 @@ async function initTerrainCompute() {
     throw error;
   }
 }
-async function buildBaseTerrainGPU({ n, OC, off, ez, add, sub, ranges, noise, profile, frequency = 1, elevation = 1, relief = 1 }) {
+function getTerrainCompute() {
   if (typeof navigator === 'undefined' || !navigator.gpu) return null;
+  return terrainCompute ??= initTerrainCompute().catch(error => {
+    terrainCompute = undefined;
+    throw error;
+  });
+}
+async function runTerrainKernel(device, pipeline, inputs, bytes, n, readResult) {
+  const max = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
+  if (bytes > max || inputs.some(input => input.byteLength > max)) return null;
   const buffers = [];
   try {
-    const gpu = await (terrainCompute ??= initTerrainCompute().catch(error => {
-      terrainCompute = undefined;
-      throw error;
-    }));
-    if (!gpu) return null;
-    const { device, pipeline } = gpu, cells = n * n, bytes = cells * 8;
-    if (bytes > device.limits.maxStorageBufferBindingSize) return null;
-    // The CPU builds the same mainland profile for both backends.
-    const header = [n, OC, off, ez, add.length, sub.length, ranges.length, profile ? PROFILE_SIZE : 0, frequency, elevation, relief,
-      ...[...add, ...sub].flatMap(({ x, y, rx, ry, c, s }) => [x, y, rx, ry, c, s]),
-      ...ranges.flatMap(({ w, amp, pts }) => [w, amp, ...pts.flat()])];
-    const config = new Float32Array(header.length + (profile?.length ?? 0));
-    config.set(header);
-    if (profile) config.set(profile, header.length);
-    const { p, gx, gy } = noise.tables, tables = new Float32Array(1024);
-    tables.set(p); tables.set(gx, 512); tables.set(gy, 768);
     const allocate = (size, usage) => {
       const buffer = device.createBuffer({ size, usage });
       buffers.push(buffer);
@@ -221,14 +214,15 @@ async function buildBaseTerrainGPU({ n, OC, off, ez, add, sub, ranges, noise, pr
     device.pushErrorScope('out-of-memory');
     device.pushErrorScope('internal');
     try {
-      const cfg = allocate(config.byteLength, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
-      const lookup = allocate(tables.byteLength, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
+      const sources = inputs.map(input => {
+        const buffer = allocate(input.byteLength, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
+        device.queue.writeBuffer(buffer, 0, input);
+        return buffer;
+      });
       const out = allocate(bytes, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
       read = allocate(bytes, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
-      device.queue.writeBuffer(cfg, 0, config);
-      device.queue.writeBuffer(lookup, 0, tables);
       const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
-        entries: [cfg, lookup, out].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+        entries: [...sources, out].map((buffer, binding) => ({ binding, resource: { buffer } })) });
       const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, bindGroup);
@@ -242,12 +236,30 @@ async function buildBaseTerrainGPU({ n, OC, off, ez, add, sub, ranges, noise, pr
       if (error) throw new Error(error.message);
     }
     await read.mapAsync(GPUMapMode.READ);
-    const values = new Float32Array(read.getMappedRange());
-    return { h: values.slice(0, cells), sMap: values.slice(cells) };
+    return readResult(read.getMappedRange());
+  } finally {
+    for (const buffer of buffers) buffer.destroy();
+  }
+}
+async function buildBaseTerrainGPU({ n, OC, off, ez, add, sub, ranges, noise, profile, frequency = 1, elevation = 1, relief = 1 }) {
+  try {
+    const gpu = await getTerrainCompute();
+    if (!gpu) return null;
+    // The CPU builds the same mainland profile for both backends.
+    const header = [n, OC, off, ez, add.length, sub.length, ranges.length, profile ? PROFILE_SIZE : 0, frequency, elevation, relief,
+      ...[...add, ...sub].flatMap(({ x, y, rx, ry, c, s }) => [x, y, rx, ry, c, s]),
+      ...ranges.flatMap(({ w, amp, pts }) => [w, amp, ...pts.flat()])];
+    const config = new Float32Array(header.length + (profile?.length ?? 0));
+    config.set(header);
+    if (profile) config.set(profile, header.length);
+    const { p, gx, gy } = noise.tables, tables = new Float32Array(1024), cells = n * n;
+    tables.set(p); tables.set(gx, 512); tables.set(gy, 768);
+    return await runTerrainKernel(gpu.device, gpu.pipeline, [config, tables], cells * 8, n, result => {
+      const values = new Float32Array(result);
+      return { h: values.slice(0, cells), sMap: values.slice(cells) };
+    });
   } catch (error) {
     console.warn('WebGPU terrain failed. Using CPU.', error);
     return null;
-  } finally {
-    for (const buffer of buffers) buffer.destroy();
   }
 }

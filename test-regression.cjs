@@ -2,8 +2,8 @@
 // and roads never run along a river. Run with `node test-regression.cjs`; WF_ROOT compares another copy of the project.
 const assert = require('node:assert/strict'), { createApp } = require('./test-harness.cjs');
 const SEEDS = [['r1', 'round'], ['r2', 'crescent'], ['r3', 'rolling'], ['r4', 'coastal'], ['r5', 'mountainous'], ['r6', 'twin'], ['r7', 'plateaus']];
-// Known issue, present before the road/river fix: a few river-bed cells rise downstream on mainland terrain. Lower this as it gets fixed.
-const UPHILL_BUDGET = { coastal: 6, mountainous: 5 };
+// River beds must never rise downstream. Per-shape allowances can go here if a known exception ever returns.
+const UPHILL_BUDGET = {};   // fixed: the bed is now forced to fall (or stay level) along every river
 const fingerprint = w => { let a = 2166136261; for (let i = 0; i < w.h.length; i += 5) a = Math.imul(a ^ Math.round(w.h[i] * 10), 16777619); for (const r of w.roads) a = Math.imul(a ^ r.path.length, 16777619); return [a >>> 0, w.roads.length, w.pois.length, w.lakes.length, w.rivers.length].join('/'); };
 const channelRun = w => { let best = 0; for (const r of w.roads) { let run = 0; for (const c of r.path) { if (w.chanM[c] || w.riv[c]) best = Math.max(best, ++run); else run = 0; } } return best * w.cell; };
 (async () => {

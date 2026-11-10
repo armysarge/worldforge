@@ -2,7 +2,7 @@
 
 // ---------- saved worlds and shareable links ----------
 // Every setting that changes the generated world. The same values reproduce the same map (CPU compute is deterministic; WebGPU may differ slightly).
-const SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms', 'hydraulic'];
+const SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms', 'hydraulic', 'pois', 'splines'];
 const settingsSnapshot = () => Object.fromEntries(SETTING_IDS.map(id => [id, String($(id).value)]));
 function applySettings(settings) {
   for (const id of SETTING_IDS) if (settings[id] != null && $(id)) $(id).value = settings[id];

@@ -6,9 +6,33 @@ const tag = (N = S.n) => `${S.mainland ? S.shape : 'island'}_${S.seed}_${S.sizeM
 const norm = v => clamp((v - S.hmin) / (S.hmax - S.hmin) * 65535, 0, 65535);
 function normH(h) { const o = new Uint16Array(h.length); for (let i = 0; i < h.length; i++) o[i] = norm(h[i]); return o; }
 const expN = () => +$('xres').value || S.n;
-// export-resolution heightmap: Catmull-Rom upsample of the grid, fine slope-aware detail, rivers re-carved at full res
-function buildHeightWindow(world, N, ox = 0, oy = 0, quads = N - 1) {
-  const { n, h, land, urban, riv, biome, slope } = world, f = (n - 1) / quads, cellH = world.sizeM / quads;
+// 0..1 per grid cell: how strongly added relief is suppressed. 1 on water, roads, river channels, streets and around
+// buildings, easing to 0 over about two cells, so built ground stays smooth without a hard edge where the relief starts.
+function calmField(world) {
+  if (world.calm) return world.calm;
+  const { n, cell, land, urban, riv, roadBedM, chanM } = world, m = new Float32Array(n * n);
+  for (let i = 0; i < n * n; i++) if (!land[i] || urban[i] || riv[i] || roadBedM[i] || chanM[i]) m[i] = 1;
+  const dot = (xm, ym, rm) => {
+    for (let y = Math.max(0, Math.floor((ym - rm) / cell)); y <= Math.min(n - 1, Math.ceil((ym + rm) / cell)); y++)
+      for (let x = Math.max(0, Math.floor((xm - rm) / cell)); x <= Math.min(n - 1, Math.ceil((xm + rm) / cell)); x++) m[y * n + x] = 1;
+  };
+  for (const b of world.buildings) dot(b.x, b.y, Math.hypot(b.w, b.d) / 2 + 8);
+  for (const st of world.streets) for (const [x, y] of st.pts) dot(x, y, st.w / 2 + 4);
+  for (const r of world.roads) if (r.type !== 'trail') for (const c of r.path) m[c] = 1;
+  return world.calm = blur(blur(m, n, 1), n, 1);
+}
+// added relief per biome (index = biome id): worked fields and beaches stay smooth, rock gets the most
+const DETAIL_GAIN = [0, .3, .7, .9, 1.6, 1.6, 1.6, .35, 0, .2];
+// the ground the export upsamples: the grid as it was before the river carve (grid height + carve depth). The channel is
+// cut again from the river polylines at export resolution, which gives smooth banks instead of magnified grid steps.
+function exportSource(world, N, quads = N - 1) {
+  if (!world.carveD || (world.n - 1) / quads >= 1) return world.h;
+  const h = world.h.slice(), cd = world.carveD; for (let i = 0; i < h.length; i++) h[i] += cd[i];
+  return h;
+}
+// CPU: Catmull-Rom upsample of the grid plus fine slope-aware detail (the WebGPU version is upsampleDetailGPU)
+function upsampleDetailCPU(world, N, ox, oy, quads, h, calm) {
+  const { n, land, biome, slope } = world, f = (n - 1) / quads, cellH = world.sizeM / quads;
   const cr = (p0, p1, p2, p3, t) => p1 + .5 * t * (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)));
   const firstRow = Math.max(0, Math.floor(oy * f) - 1), lastRow = Math.min(n - 1, Math.floor((oy + N - 1) * f) + 2);
   const tmp = new Float32Array((lastRow - firstRow + 1) * N), H = new Float32Array(N * N);
@@ -24,23 +48,42 @@ function buildHeightWindow(world, N, ox = 0, oy = 0, quads = N - 1) {
   const nz = mkNoise(mulberry(hashSeed(world.seed) ^ 0x9e3779b9));
   const tiled = quads > N - 1;
   for (let Y = 0; Y < N; Y++) for (let X = 0; X < N; X++) {
-    const gi = Math.round((oy + Y) * f) * n + Math.round((ox + X) * f); if (!land[gi] || urban[gi] || riv[gi] || world.roadBedM[gi] || world.chanM[gi]) continue;
+    const gyf = (oy + Y) * f, gxf = (ox + X) * f, gi = Math.round(gyf) * n + Math.round(gxf); if (!land[gi]) continue;
     const o = Y * N + X, base = H[o]; if (base <= .3) continue;
+    const cx = Math.min(n - 2, gxf | 0), cy = Math.min(n - 2, gyf | 0), tx = gxf - cx, ty = gyf - cy, ci = cy * n + cx;
+    const quiet = lerp(lerp(calm[ci], calm[ci + 1], tx), lerp(calm[ci + n], calm[ci + n + 1], tx), ty), keep = 1 - sstep(.02, .45, quiet);
+    if (keep <= 0) continue;
     const b = biome[gi], rock = b >= 4 && b <= 6, tan = Math.min(Math.tan(slope[gi] / 57.2958), 1.2);
-    const amp = Math.min(40, cellH * (.3 + 2 * tan) * (rock ? 1.6 : 1)) * sstep(0, 3, base);
+    const amp = Math.min(40, cellH * (.3 + 2 * tan) * DETAIL_GAIN[b]) * sstep(0, 3, base) * keep;
     const x = (ox + X) / 24, y = (oy + Y) / 24;
     let v = tiled ? fbm(nz, .8 * x - .6 * y, .6 * x + .8 * y, 4) : fbm(nz, x, y, 4);
     if (rock) v = .5 - Math.abs(v) * 1.5;
     H[o] = Math.max(.3, base + v * amp);
   }
+  return H;
+}
+// rivers re-cut at window resolution
+function carveWindow(world, H, N, ox, oy, quads) {
+  const { n } = world, f = (n - 1) / quads, cellH = world.sizeM / quads;
   carveRivers(H, N, cellH, world.rivers, 1 / f, world.riverW, world.riverD,
     I => world.rimL[Math.round((oy + (I / N | 0)) * f) * n + Math.round((ox + I % N) * f)], null, { ox, oy, quads, openEdge: world.mainland });
   return H;
 }
-function buildHeightTile(world, count, N, x, y) {
+// export-resolution heightmap window (CPU). ox, oy, quads place the window inside a larger tiled export.
+function buildHeightWindow(world, N, ox = 0, oy = 0, quads = N - 1) {
+  return carveWindow(world, upsampleDetailCPU(world, N, ox, oy, quads, exportSource(world, N, quads), calmField(world)), N, ox, oy, quads);
+}
+// the same window with the per-sample work on WebGPU when Terrain compute is Auto and a GPU is available
+async function buildHeightWindowFast(world, N, ox = 0, oy = 0, quads = N - 1) {
+  const source = exportSource(world, N, quads), calm = calmField(world);
+  const gpu = $('compute').value === 'auto' && typeof upsampleDetailGPU === 'function' ? await upsampleDetailGPU(world, N, ox, oy, quads, source, calm) : null;
+  world.exportBackend = gpu ? 'webgpu' : 'cpu';
+  return carveWindow(world, gpu ?? upsampleDetailCPU(world, N, ox, oy, quads, source, calm), N, ox, oy, quads);
+}
+async function buildHeightTile(world, count, N, x, y) {
   const q = N - 1, ox = x * q, oy = y * q, quads = count * q;
   // shortcut: use shared base drainage until a whole-world tiled flood can reconcile outlets across seams.
-  return gradeSites(buildHeightWindow(world, N, ox, oy, quads), N, world, ox, oy, quads);
+  return gradeSites(await buildHeightWindowFast(world, N, ox, oy, quads), N, world, ox, oy, quads);
 }
 async function exportH(N, world = S) {
   if (world.hcache[N]) return world.hcache[N];
@@ -50,7 +93,7 @@ async function exportH(N, world = S) {
     return graded;
   }
   $('status').textContent = `Building ${N}×${N} heightmap…`; await new Promise(r => setTimeout(r, 30));
-  const t0 = performance.now(), { n } = world, f = (n - 1) / (N - 1), H = buildHeightWindow(world, N);
+  const t0 = performance.now(), { n } = world, f = (n - 1) / (N - 1), H = await buildHeightWindowFast(world, N);
   // reality rule at export resolution too: the added detail must not leave dips that would hold water. Lean priority-flood
   // fill in place (no extra full-size arrays): land is raised to its spill level; sea and lake beds are never touched.
   const gIdx = I => Math.round((I / N | 0) * f) * n + Math.round((I % N) * f), wet = I => { const g = gIdx(I); return world.ocean[g] || world.lakeId[g]; };
@@ -70,7 +113,7 @@ async function exportH(N, world = S) {
   }
   gradeSites(H, N, world);
   world.hcache = { [N]: H };                     // ponytail: keeps only the latest size (65 MB at 4033)
-  $('status').textContent = `${N}×${N} heightmap graded in ${((performance.now() - t0) / 1000).toFixed(1)} s · ${filled} detail dips filled before grading`;
+  $('status').textContent = `${N}×${N} heightmap graded in ${((performance.now() - t0) / 1000).toFixed(1)} s (detail pass: ${world.exportBackend === 'webgpu' ? 'WebGPU' : 'CPU'}) · ${filled} detail dips filled before grading`;
   world.hiresFilled = filled;
   return H;
 }
@@ -194,12 +237,23 @@ $('xEco').onclick = () => {
   })], { type: 'application/json' }), tag() + '_ecology.json');
 };
 // ---------- Unreal / PCG helpers ----------
-// Landscape actor at (0,0,mid) with these scales puts world Z (cm) = terrain height (m) × 100, so sea level is Z = 0.
+// Every exported coordinate (POIs, roads, CSV, masks) has the map's north-west corner at world X = 0, Y = 0, and these
+// scales make world Z (cm) = terrain height (m) × 100, so sea level is Z = 0.
+// Unreal's New Landscape panel places a landscape by its CENTRE: the Location typed there must be half the footprint
+// (location). After the import the Landscape actor itself sits at the north-west corner (actorLocation).
 function ueSetup() {
   const N = expN(), q = S.sizeM * 100 / (N - 1), cfg = { 505: [63, 1, 8], 1009: [63, 2, 8], 2017: [63, 2, 16], 4033: [63, 2, 32], 8129: [127, 2, 32] }[N] || [63, 1, (N - 1) / 63];
-  return { landscapeSize: N, location: [0, 0, Math.round((S.hmin + S.hmax) / 2 * 100)], scale: [+q.toFixed(4), +q.toFixed(4), +((S.hmax - S.hmin) * 100 / 512).toFixed(4)],
-    quadsPerSection: cfg[0], sectionsPerComponent: `${cfg[1]}x${cfg[1]}`, components: `${cfg[2]}x${cfg[2]}`,
-    note: 'Unreal X = metres east ×100, Y = metres south ×100 (image rows), Z = height ×100. Sea level Z = 0.' };
+  const z = Math.round((S.hmin + S.hmax) / 2 * 100), half = Math.round(S.sizeM * 50);
+  return { landscapeSize: N, location: [half, half, z], actorLocation: [0, 0, z], scale: [+q.toFixed(4), +q.toFixed(4), +((S.hmax - S.hmin) * 100 / 512).toFixed(4)],
+    quadsPerSection: cfg[0], sectionsPerComponent: `${cfg[1]}x${cfg[1]}`, components: `${cfg[2]}x${cfg[2]}`, flipYAxis: false,
+    note: 'Unreal X = metres east ×100, Y = metres south ×100 (image rows), Z = height ×100. Sea level Z = 0.',
+    importSteps: [
+      `Landscape mode > Manage > New > Import from File: pick the .r16 (${N} x ${N}).`,
+      `Location ${half}, ${half}, ${z}. The panel places the landscape by its centre; this puts the north-west corner at 0, 0 so POIs, roads and masks line up.`,
+      `Scale ${+q.toFixed(4)}, ${+q.toFixed(4)}, ${+((S.hmax - S.hmin) * 100 / 512).toFixed(4)}. Section size ${cfg[0]}x${cfg[0]} quads, ${cfg[1]}x${cfg[1]} sections per component, ${cfg[2]}x${cfg[2]} components. Flip Y Axis off.`,
+      `After Import the Landscape actor should read Location 0, 0, ${z} in the Details panel.`,
+      'Open World (World Partition) levels: Unreal 5.7 and 5.8 have an engine bug where a heightmap imported straight into a World Partition level shows one small piece repeated with flat ground between. Import into a Basic level, save it, then use Tools > Convert Level to turn it into a World Partition level. 5.5 and 5.6 import directly.'
+    ] };
 }
 const ueP = (xm, ym, zm = hAt(xm, ym)) => [Math.round(xm * 100), Math.round(ym * 100), Math.round(zm * 100)];
 const thin = (pts, minM, keep = () => false) => {   // drop polyline points closer than minM metres (grid-coord input)
@@ -258,6 +312,13 @@ async function exportMasks() {
     ['Floodplain', i => S.floodM ? S.floodM[i] : 0, r],
     ['Wetness', wet, r],
     ['AlienStage', i => stageT[i] / 3, r],
+    // data maps, as terrain tools export them: slope (white = 60° or steeper), flow (how much water drains through, log
+    // scale), curvature (grey = flat, lighter = ridges and crests, darker = hollows and channels) and aspect (north-facing
+    // = black, south-facing = white), for driving materials, scatter and erosion effects in the engine
+    ['Data_Slope', i => clamp(slope[i] / 60, 0, 1), 0],
+    ['Data_Flow', i => S.land[i] ? clamp(Math.log2(1 + acc[i] / aT) / 14, 0, 1) : 0, r],
+    ['Data_Curvature', i => { const x = i % n, y = i / n | 0; if (x < 1 || y < 1 || x >= n - 1 || y >= n - 1) return .5; return .5 + clamp((4 * S.h[i] - S.h[i - 1] - S.h[i + 1] - S.h[i - n] - S.h[i + n]) / cell * 2.5, -.5, .5); }, r],
+    ['Data_Aspect', i => { const y = i / n | 0; if (y < 1 || y >= n - 1) return .5; return .5 + clamp((S.h[i - n] - S.h[i + n]) / (2 * cell) * 1.5, -.5, .5); }, r],
     // resource masks (0..1 density) for PCG scatter: trees by wood type, rocks/boulders, ore outcrops, forage, herbs, game, fish
     ...['softwood', 'hardwood', 'forage', 'herbs'].map(k => ['Res_' + k, i => S.res[k][i] / 255, r, true]),
     ...['stone', 'clay', 'sand', 'crops', 'game', 'fish', 'alien', ...ORE_KEYS].map(k => ['Res_' + k, i => S.res[k][i] / 255, r]),
@@ -277,6 +338,39 @@ async function exportMasks() {
 }
 $('xMasks').onclick = () => S && exportMasks();
 
+// Outlines of areas as polylines in metres (closed loops, or open where an area runs off the map edge): marching squares
+// over the generation grid sampled every `step` cells, then the edge crossings are chained into lines.
+function traceLoops(world, inside, step, minPts = 10) {
+  const { n, cell } = world, G = Math.floor((n - 1) / step) + 1, v = new Uint8Array(G * G);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) v[y * G + x] = inside(Math.min(n - 1, y * step) * n + Math.min(n - 1, x * step)) ? 1 : 0;
+  const adj = new Map(), link = (a, b) => { for (const [p, q] of [[a, b], [b, a]]) { let l = adj.get(p); if (!l) adj.set(p, l = []); l.push(q); } };
+  for (let y = 0; y < G - 1; y++) for (let x = 0; x < G - 1; x++) {
+    const a = v[y * G + x], b = v[y * G + x + 1], c = v[(y + 1) * G + x + 1], d = v[(y + 1) * G + x];
+    const T = 2 * (y * G + x), R = 2 * (y * G + x + 1) + 1, B = 2 * ((y + 1) * G + x), L = 2 * (y * G + x) + 1, cross = [];
+    if (a !== b) cross.push(T); if (b !== c) cross.push(R); if (c !== d) cross.push(B); if (d !== a) cross.push(L);
+    if (cross.length === 2) link(cross[0], cross[1]);
+    else if (cross.length === 4) { if (a) { link(T, R); link(B, L); } else { link(T, L); link(R, B); } }
+  }
+  const at = key => { const e = key >> 1, x = e % G, y = e / G | 0; return key & 1 ? [x * step * cell, (y + .5) * step * cell] : [(x + .5) * step * cell, y * step * cell]; };
+  const seen = new Set(), out = [];
+  const walk = start => { const keys = [start]; seen.add(start); for (let cur = start; ;) { const next = (adj.get(cur) || []).find(k => !seen.has(k)); if (next === undefined) break; seen.add(next); keys.push(next); cur = next; } return keys; };
+  for (const [start, l] of adj) if (l.length === 1 && !seen.has(start)) { const k = walk(start); if (k.length >= minPts) out.push({ closed: false, pts: k.map(at) }); }   // open lines first
+  for (const start of adj.keys()) if (!seen.has(start)) { const k = walk(start); if (k.length >= minPts) out.push({ closed: true, pts: k.map(at) }); }
+  // one corner-cutting pass takes the grid look off the outline
+  for (const o of out) { const p = o.pts, q = []; for (let j = 0; j < p.length - (o.closed ? 0 : 1); j++) { const a = p[j], b = p[(j + 1) % p.length]; q.push([a[0] * .75 + b[0] * .25, a[1] * .75 + b[1] * .25], [a[0] * .25 + b[0] * .75, a[1] * .25 + b[1] * .75]); } o.pts = o.closed ? q : [p[0], ...q, p.at(-1)]; }
+  return out.sort((a, b) => b.pts.length - a.pts.length);
+}
+// Area outlines for engines: coastline, lake shores and the main land-cover zones, largest first, at most `cap` per kind.
+const AREA_KINDS = [['coast', 'Coastline', w => i => !w.ocean[i], 1], ['lake', 'Lake shore', w => i => w.lakeId[i] > 0, 1], ['forest', 'Forest', w => i => w.biome[i] === 3, 2],
+  ['farmland', 'Farmland', w => i => w.biome[i] === 9, 2], ['wetland', 'Wetland', w => i => w.biome[i] === 7, 2], ['beach', 'Beach', w => i => w.biome[i] === 1, 1],
+  ['highland', 'Highland and alpine', w => i => w.biome[i] === 4 || w.biome[i] === 5, 2], ['snow', 'Snow', w => i => w.biome[i] === 6, 2]];
+function worldAreas(world = S, cap = 40) {
+  if (world.areas) return world.areas;
+  const base = Math.max(1, Math.round(world.n / 336)), out = [];
+  for (const [kind, label, make, coarse] of AREA_KINDS)
+    traceLoops(world, make(world), base * coarse).slice(0, cap).forEach((o, j) => out.push({ kind, name: `${label} ${j + 1}`, closed: o.closed, pts: o.pts }));
+  return world.areas = out;
+}
 // Unreal Editor Python script: landscape transform, POI markers, PCG volumes, road + river splines, lake markers
 function ueScript() {
   const U = ueSetup(), T6 = S.riverT * 6;
@@ -292,7 +386,7 @@ function ueScript() {
       ...(S.slice ? [[S.slice, 'PCG_VerticalSlice', 'slice'], [S.slice.dev, 'PCG_DevArea', 'dev']].map(([b, nm, tg]) => { const [X, Y, Z] = ueP(b.cx * S.cell, b.cy * S.cell); return [nm, X, Y, Z, b.size * 100, b.size * 100, 60000, [tg]]; }) : []),
       (() => {
         const c = S.sizeM * 50, span = (S.hmax - S.hmin) * 100 + 4000;
-        return S.mainland ? ['PCG_Terrain', c, c, U.location[2], S.sizeM * 100, S.sizeM * 100, span, ['terrain']]
+        return S.mainland ? ['PCG_Terrain', c, c, U.actorLocation[2], S.sizeM * 100, S.sizeM * 100, span, ['terrain']]
           : ['PCG_Island', c, c, 0, S.sizeM * 100, S.sizeM * 100, 600000, ['island']];
       })()
     ],
@@ -309,19 +403,79 @@ function ueScript() {
       const pts = thin(p.filter(q => q[2] >= T6), Math.max(2 * S.cell, 30));
       return pts.length < 2 ? null : [Math.round(S.riverW(pts[0][2][2])), Math.round(S.riverW(pts[pts.length - 1][2][2])), pts.map(([xm, ym, q]) => ueP(xm, ym, q[3] + S.riverD(q[2]) * .8))];
     }).filter(Boolean),
-    lakes: S.lakes.map(l => [l.name, ...ueP(l.x * S.cell, l.y * S.cell, l.level), +l.area.toFixed(3), !!l.reservoir])
+    lakes: S.lakes.map(l => [l.name, ...ueP(l.x * S.cell, l.y * S.cell, l.level), +l.area.toFixed(3), !!l.reservoir]),
+    // outlines as closed splines: coastline, lake shores and land-cover zones (drive PCG, landscape layers or biome tools)
+    areas: worldAreas().map(o => { const pts = []; let last = null;
+      for (const [x, y] of o.pts) if (!last || Math.hypot(x - last[0], y - last[1]) >= Math.max(2 * S.cell, 20)) { pts.push(ueP(x, y, Math.max(0, hAt(x, y)) + .5)); last = [x, y]; }
+      return [o.kind, o.name, o.closed, pts]; }).filter(o => o[3].length >= 4)
   };
-  return `"""Terrain import generated by Worldforge.
-Run in Unreal Editor 5.x: enable the "Python Editor Script Plugin", open your level, then Tools > Execute Python Script.
-1. Import the heightmap first (Landscape mode > Import from file): ${U.landscapeSize}x${U.landscapeSize}, ${U.quadsPerSection} quads/section,
-   ${U.sectionsPerComponent} sections/component, ${U.components} components. This script then moves/scales it so sea level is Z = 0.
-2. Roads use SPLINE_BP (an Actor Blueprint with one SplineComponent). Create it once at the path below, or change the path.
-3. Rivers use the Water plugin (WaterBodyRiver) when it is enabled, else SPLINE_BP. Widths are in each actor's tags.
-Re-running deletes and rebuilds everything in the "${root}" outliner folder.
+  return `"""Worldforge import for Unreal Editor 5 - ${root}
+
+WHAT THIS DOES
+  Places everything that belongs on top of the terrain: place markers, PCG volumes, road / street / metro splines,
+  rivers, lake markers, and outlines of the coast, lakes and land-cover zones (forest, farmland, wetland, ...).
+  It never imports the heightmap for you. Running it again replaces what it made before (outliner folder "${root}").
+
+STEP 1 - IMPORT THE HEIGHTMAP (once)
+  Landscape mode > Manage > New > Import from File, pick the .r16, then type these values:
+    Heightmap     ${U.landscapeSize} x ${U.landscapeSize}
+    Section size  ${U.quadsPerSection}x${U.quadsPerSection} quads     Sections per component  ${U.sectionsPerComponent}     Components  ${U.components}
+    Location      ${U.location.join(', ')}     <- the CENTRE of the map (the panel places a landscape by its centre)
+    Scale         ${U.scale.join(', ')}
+    Flip Y Axis   off
+  Press Import. The Landscape actor should then read Location ${U.actorLocation.join(', ')} in Details, and sea level is Z = 0.
+  Open World level on Unreal 5.7 or 5.8: importing straight into it is broken in the engine (one piece of terrain repeated,
+  flat ground between). Import into a Basic level, save it, then Tools > Convert Level.
+
+STEP 2 - TURN ON THE PLUGINS (once, then restart the editor)
+  Edit > Plugins: "Python Editor Script Plugin" (required), "PCG" (for the volumes).
+
+STEP 2b - MAKE THE SPLINE BLUEPRINT (once)
+  Content Browser > Add > Blueprint Class > Actor, name it BP_WorldforgeSpline, put it in /Game/Worldforge.
+  Open it, Add > Spline, Compile, Save. Roads, rivers and outlines are spawned from it. Without it those parts are
+  skipped and the summary says so; markers, volumes and lakes do not need it.
+
+STEP 3 - RUN THIS FILE
+  Open the level with the landscape, then Tools > Execute Python Script... and pick this file.
+  A summary window lists what was created and what was skipped, with the reason. The same text is in the Output Log.
+
+IF THE EDITOR STRUGGLES
+  Save the level first. Set 'streets' and 'area outlines' to False in RUN for a lighter first pass, then add them back.
+  Leave USE_WATER_PLUGIN off until everything else is in: Water plugin rivers are the heaviest thing this file can make.
+
+SETTINGS YOU MAY WANT TO CHANGE are just below: which parts to run, and the Blueprint used for splines.
 """
 import unreal, json
 
-SPLINE_BP = '/Game/DesolationDay/Environment/Island/BP_IslandSpline'
+# ---- settings -------------------------------------------------------------------------------------------------------
+# Set a part to False to leave it out.
+RUN = {
+    'landscape check': True,   # checks the landscape position and scale (moves it only in a plain, single-landscape level)
+    'place markers': True,     # one Target Point per place, tagged with id, type, region, zone, danger, loot, resources
+    'PCG volumes': True,       # a PCG Volume over each settlement and over the whole terrain
+    'roads': True,             # highways, gravel roads and dirt tracks as splines
+    'streets': True,           # settlement streets as splines (the largest group of actors: turn off for a lighter first run)
+    'metro': True,             # underground metro lines as splines
+    'rivers': True,            # rivers as plain splines (see USE_WATER_PLUGIN below)
+    'lakes': True,             # one marker per lake at its water level
+    'area outlines': True,     # coastline, lake shores, forest / farmland / wetland / beach / highland / snow as closed splines
+    'menu camera': True,       # the main-menu vista camera, when the world has one
+}
+# Splines are spawned from this Blueprint: an Actor with one Spline component. Make it once: Content Browser > Add >
+# Blueprint Class > Actor, name it BP_WorldforgeSpline in /Game/Worldforge, open it, Add > Spline, Compile, Save.
+SPLINE_BP = '/Game/Worldforge/BP_WorldforgeSpline'
+# True lets the script try to create that Blueprint itself when it is missing. Off by default: it drives the Blueprint
+# editor from Python, which is the least dependable call in this file.
+CREATE_SPLINE_BP = False
+# True spawns real Water plugin rivers instead of plain splines. Off by default: every water body re-renders the landscape
+# water brush and holds GPU memory, and dozens of them at once can exhaust the graphics card and crash the editor.
+# Get everything else in first, save, then turn this on (lower MAX_WATER_RIVERS if the editor struggles).
+USE_WATER_PLUGIN = False
+MAX_WATER_RIVERS = 12          # largest rivers first; the rest stay plain splines
+# Most outlines to make per kind (largest first). 0 = all of them.
+MAX_AREAS_PER_KIND = 12
+# ---------------------------------------------------------------------------------------------------------------------
+
 DATA = json.loads(r'''${JSON.stringify(data)}''')
 ROOT = DATA['root']
 eas = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
@@ -339,18 +493,12 @@ def spawn(cls, loc, label, folder, tags=()):
     return a
 
 
-def set_points(spline, pts):
+def set_points(spline, pts, closed=False):
     spline.clear_spline_points(False)
     for p in pts:
         spline.add_spline_point(V(p), unreal.SplineCoordinateSpace.WORLD, False)
+    spline.set_closed_loop(closed, False)
     spline.update_spline()
-
-
-def step(name, fn):
-    try:
-        fn()
-    except Exception as e:
-        unreal.log_warning('Island import: %s failed: %s' % (name, e))
 
 
 # remove a previous import
@@ -362,75 +510,191 @@ for a in eas.get_all_level_actors():
 
 def landscape():
     L = DATA['landscape']
-    for a in eas.get_all_level_actors():
-        if isinstance(a, unreal.Landscape):
-            a.set_actor_location(V(L['location']), False, False)
-            a.set_actor_scale3d(V(L['scale']))
-            unreal.log('Island import: landscape placed, sea level is Z = 0')
-            return
-    unreal.log_warning('Island import: no Landscape in the level - import the heightmap, then re-run (or move it to %s, scale %s)' % (L['location'], L['scale']))
+    want_loc, want_scale = V(L['actorLocation']), V(L['scale'])
+    actors = eas.get_all_level_actors()
+    lands = [a for a in actors if isinstance(a, unreal.Landscape)]
+    proxy_cls = getattr(unreal, 'LandscapeStreamingProxy', None)
+    proxies = [a for a in actors if proxy_cls and isinstance(a, proxy_cls)]
+    hint = 'import Location %s (centre), Scale %s; the actor should then read Location %s' % (L['location'], L['scale'], L['actorLocation'])
+    if not lands:
+        return 'SKIPPED - no Landscape in the level. Do step 1 (%s), then run this script again' % hint
+
+    def fits(a):
+        loc, sc = a.get_actor_location(), a.get_actor_scale3d()
+        return (abs(loc.x - want_loc.x) < 2 and abs(loc.y - want_loc.y) < 2 and abs(loc.z - want_loc.z) < 2
+                and abs(sc.x - want_scale.x) < 0.01 and abs(sc.y - want_scale.y) < 0.01 and abs(sc.z - want_scale.z) < 0.01)
+
+    if any(fits(a) for a in lands):
+        return 'OK - already at the right place and scale, sea level is Z = 0'
+    if len(lands) == 1 and not proxies:
+        lands[0].set_actor_location(want_loc, False, False)
+        lands[0].set_actor_scale3d(want_scale)
+        return 'OK - moved and scaled, sea level is Z = 0'
+    # World Partition keeps the terrain in streaming proxy actors that do not follow the Landscape actor when a script
+    # moves it, and a level can hold other landscapes (the Open World template has its own): never guess here.
+    for a in lands:
+        loc, sc = a.get_actor_location(), a.get_actor_scale3d()
+        unreal.log_warning('Island import: landscape "%s" is at (%.0f, %.0f, %.0f) scale (%.3f, %.3f, %.3f)' % (a.get_actor_label(), loc.x, loc.y, loc.z, sc.x, sc.y, sc.z))
+    return ('NOT MOVED - no landscape matches this world and the level is World Partition or has several landscapes. '
+            'Re-import with: %s. Everything else below is still placed at the right world positions.' % hint)
 
 
 def pois():
     for pid, typ, name, x, y, z, region, zone, danger, loot, resources in DATA['pois']:
         spawn(unreal.TargetPoint, (x, y, z), name or pid, 'POI/' + typ,
-              ['IslandPOI', 'id:' + pid, 'type:' + typ, 'region:' + region, 'zone:' + zone, 'danger:%d' % danger, 'loot:%d' % loot]
+              ['IslandPOI', 'id:' + pid, 'type:' + typ, 'region:' + region, 'zone:' + zone, 'danger:%s' % (danger or 0), 'loot:%s' % (loot or 0)]
               + ['res:' + r for r in resources.split(';') if r])
+    return 'OK - %d markers in "%s/POI"' % (len(DATA['pois']), ROOT)
 
 
 def menu_camera():
     c = DATA.get('menuCamera')
     if not c:
-        return
+        return 'nothing to do - this world has no menu camera'
     a = eas.spawn_actor_from_class(unreal.CineCameraActor, V(c['pos']), unreal.Rotator(roll=0.0, pitch=c['pitch'], yaw=c['yaw']))
     a.set_actor_label('MainMenu_Vista_Camera')
     a.set_folder_path(ROOT + '/MainMenu')
     a.tags = [unreal.Name('IslandMenuCamera')]
+    return 'OK - MainMenu_Vista_Camera'
 
 
 def volumes():
+    if not hasattr(unreal, 'PCGVolume'):
+        return 'SKIPPED - the PCG plugin is off (Edit > Plugins > PCG, restart, run again)'
     for label, x, y, z, sx, sy, sz, tags in DATA['volumes']:
         a = spawn(unreal.PCGVolume, (x, y, z), label, 'PCG', ['IslandPCG'] + tags)
         a.set_actor_scale3d(unreal.Vector(sx / 200.0, sy / 200.0, sz / 200.0))   # default volume brush is 200 uu
+    return 'OK - %d volumes' % len(DATA['volumes'])
+
+
+_spline_cls = []
 
 
 def spline_class():
-    return unreal.EditorAssetLibrary.load_blueprint_class(SPLINE_BP) if unreal.EditorAssetLibrary.does_asset_exist(SPLINE_BP) else None
+    """The spline Blueprint class; creates the Blueprint (Actor + one SplineComponent) the first time if it is missing."""
+    if _spline_cls:
+        return _spline_cls[0]
+    cls = None
+    try:
+        if not unreal.EditorAssetLibrary.does_asset_exist(SPLINE_BP):
+            if not CREATE_SPLINE_BP:
+                _spline_cls.append(None)
+                return None
+            folder, name = SPLINE_BP.rsplit('/', 1)
+            factory = unreal.BlueprintFactory()
+            factory.set_editor_property('parent_class', unreal.Actor)
+            bp = unreal.AssetToolsHelpers.get_asset_tools().create_asset(name, folder, unreal.Blueprint, factory)
+            sds = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+            handles = sds.k2_gather_subobject_data_for_blueprint(bp)
+            sds.add_new_subobject(unreal.AddNewSubobjectParams(parent_handle=handles[0], new_class=unreal.SplineComponent, blueprint_context=bp))
+            unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+            unreal.EditorAssetLibrary.save_asset(SPLINE_BP)
+            unreal.log('Worldforge import: created %s' % SPLINE_BP)
+        cls = unreal.EditorAssetLibrary.load_blueprint_class(SPLINE_BP)
+    except Exception as e:
+        unreal.log_warning('Worldforge import: could not create or load %s: %s' % (SPLINE_BP, e))
+    _spline_cls.append(cls)
+    return cls
+
+
+NO_SPLINE_BP = ('SKIPPED - the spline Blueprint %s does not exist yet. Make it once (Content Browser > Add > Blueprint Class > Actor, '
+                'Add > Spline, Compile, Save at that path) and run again') % SPLINE_BP
+
+
+def spline_actor(cls, pts, label, folder, tags, closed=False):
+    a = spawn(cls, pts[0], label, folder, tags)
+    sp = a.get_component_by_class(unreal.SplineComponent)
+    if not sp:
+        raise RuntimeError('%s has no Spline component' % SPLINE_BP)
+    set_points(sp, pts, closed)
+    return a
+
+
+def road_splines(kinds, folder):
+    cls = spline_class()
+    if not cls:
+        return NO_SPLINE_BP
+    count = {}
+    for j, (typ, label, pts) in enumerate(DATA['roads']):
+        if typ not in kinds:
+            continue
+        spline_actor(cls, pts, '%s_%03d %s' % (typ, j + 1, label), folder + '/' + typ, ['IslandRoad', 'type:' + typ])
+        count[typ] = count.get(typ, 0) + 1
+    return 'OK - ' + (', '.join('%d %s' % (n, t) for t, n in sorted(count.items())) or 'none in this world')
 
 
 def roads():
-    cls = spline_class()
-    if not cls:
-        unreal.log_warning('Island import: %s not found - roads skipped' % SPLINE_BP)
-        return
-    for j, (typ, label, pts) in enumerate(DATA['roads']):
-        a = spawn(cls, pts[0], '%s_%03d %s' % (typ, j + 1, label), 'Roads/' + typ, ['IslandRoad', 'type:' + typ])
-        set_points(a.get_component_by_class(unreal.SplineComponent), pts)
+    return road_splines(('highway', 'road', 'trail'), 'Roads')
+
+
+def streets():
+    return road_splines(('street',), 'Roads')
+
+
+def metro():
+    return road_splines(('metro',), 'Roads')
 
 
 def rivers():
-    water = hasattr(unreal, 'WaterBodyRiver')
-    cls = unreal.WaterBodyRiver if water else spline_class()
-    if not cls:
-        unreal.log_warning('Island import: no Water plugin and no %s - rivers skipped' % SPLINE_BP)
-        return
+    water_cls = getattr(unreal, 'WaterBodyRiver', None) if USE_WATER_PLUGIN else None
+    cls = spline_class()
+    if not cls and not water_cls:
+        return NO_SPLINE_BP
+    order = sorted(range(len(DATA['rivers'])), key=lambda j: -DATA['rivers'][j][1])     # widest at the mouth first
+    as_water = set(order[:MAX_WATER_RIVERS]) if water_cls else set()
+    made = [0, 0]
     for j, (w0, w1, pts) in enumerate(DATA['rivers']):
-        a = spawn(cls, pts[0], 'River_%03d' % (j + 1), 'Rivers', ['IslandRiver', 'widthStartM:%d' % w0, 'widthEndM:%d' % w1])
-        sp = a.get_water_spline() if water else a.get_component_by_class(unreal.SplineComponent)
-        set_points(sp, pts)
+        tags = ['IslandRiver', 'widthStartM:%d' % w0, 'widthEndM:%d' % w1]
+        if j in as_water:
+            a = spawn(water_cls, pts[0], 'River_%03d' % (j + 1), 'Rivers', tags)
+            set_points(a.get_water_spline(), pts)
+            made[0] += 1
+        elif cls:
+            spline_actor(cls, pts, 'River_%03d' % (j + 1), 'Rivers', tags)
+            made[1] += 1
+    return 'OK - %d Water plugin rivers, %d plain splines (widths are in the actor tags)' % tuple(made)
 
 
 def lakes():
     for name, x, y, z, area, reservoir in DATA['lakes']:
         spawn(unreal.TargetPoint, (x, y, z), name, 'Lakes', ['IslandLake', 'areaKm2:%s' % area] + (['reservoir'] if reservoir else []))
+    return 'OK - %d lake markers' % len(DATA['lakes'])
 
 
-with unreal.ScopedSlowTask(7, 'Importing island') as task:
+def areas():
+    cls = spline_class()
+    if not cls:
+        return NO_SPLINE_BP
+    count = {}
+    for kind, name, closed, pts in DATA.get('areas', []):
+        if MAX_AREAS_PER_KIND and count.get(kind, 0) >= MAX_AREAS_PER_KIND:
+            continue
+        spline_actor(cls, pts, name, 'Areas/' + kind, ['IslandArea', 'kind:' + kind], closed)
+        count[kind] = count.get(kind, 0) + 1
+    return 'OK - ' + (', '.join('%d %s' % (n, k) for k, n in sorted(count.items())) or 'no outlines in this world')
+
+
+STEPS = (('landscape check', landscape), ('place markers', pois), ('PCG volumes', volumes), ('roads', roads), ('streets', streets),
+         ('metro', metro), ('rivers', rivers), ('lakes', lakes), ('area outlines', areas), ('menu camera', menu_camera))
+report = []
+with unreal.ScopedSlowTask(len(STEPS), 'Worldforge import') as task:
     task.make_dialog(True)
-    for name, fn in (('landscape', landscape), ('POIs', pois), ('PCG volumes', volumes), ('roads', roads), ('rivers', rivers), ('lakes', lakes), ('menu camera', menu_camera)):
+    for name, fn in STEPS:
         task.enter_progress_frame(1, name)
-        step(name, fn)
-unreal.log('Island import: done - %d POIs, %d roads, %d rivers' % (len(DATA['pois']), len(DATA['roads']), len(DATA['rivers'])))
+        if not RUN.get(name, True):
+            report.append('%-16s turned off in RUN' % name)
+            continue
+        try:
+            report.append('%-16s %s' % (name, fn() or 'OK'))
+        except Exception as e:
+            report.append('%-16s FAILED - %s' % (name, e))
+        unreal.SystemLibrary.collect_garbage()       # keep editor memory flat between parts
+summary = 'Worldforge import - %s\\n\\n' % ROOT + '\\n'.join(report)
+unreal.log(summary)
+try:
+    unreal.EditorDialog.show_message('Worldforge import', summary, unreal.AppMsgType.OK)
+except Exception:
+    pass
 `;
 }
 $('xPy').onclick = () => S && save(new Blob([ueScript()], { type: 'text/x-python' }), `import_${S.mainland ? S.shape : 'island'}_${S.seed}.py`);
@@ -452,7 +716,7 @@ function worldData() {
   const { n, cell, hmin, hmax } = S, m = (x, y) => [Math.round(x * cell), Math.round(y * cell)];
   const box = b => b && { center: m(b.cx, b.cy), sizeM: b.size };
   return {
-    seed: S.seed, scenario: S.scenario, shape: S.shape, terrainSettings: S.terrainSettings, terrainBackend: S.terrainBackend, sizeMeters: S.sizeM, grid: n, metersPerPixel: cell, landKm2: +S.stats.landKm2.toFixed(1), heightMin: hmin, heightMax: hmax, seaLevelNorm: -hmin / (hmax - hmin),
+    seed: S.seed, scenario: S.scenario, shape: S.shape, terrainSettings: S.terrainSettings, terrainBackend: S.terrainBackend, roadScreeningBackend: S.roadScreeningBackend, sizeMeters: S.sizeM, grid: n, metersPerPixel: cell, landKm2: +S.stats.landKm2.toFixed(1), heightMin: hmin, heightMax: hmax, seaLevelNorm: -hmin / (hmax - hmin),
     unreal: ueSetup(),
     note: 'r16 = uint16 little-endian row-major, (h - heightMin)/(heightMax - heightMin)*65535. Coordinates are metres from the top-left (NW) corner.',
     verticalSlice: box(S.slice), devArea: S.slice && box(S.slice.dev),
@@ -474,6 +738,7 @@ function worldData() {
         st.push({ type: { 1: 'bridge', 2: 'viaduct', 3: 'tunnel', 6: 'overpass' }[r.deck[j]], from: m(...r.pts[Math.max(0, j - 1)]), to: m(...r.pts[Math.min(r.pts.length - 1, e)]), deckPoints: r.pts.slice(Math.max(0, j - 1), e + 1).map(([x, y], k) => [...m(x, y), r.profile[Math.max(0, j - 1) + k]]), lengthM: Math.round(r.dist[Math.min(r.pts.length - 1, e)] - r.dist[Math.max(0, j - 1)]) }); j = e; }
       return { type: r.type, from: r.a, to: r.b, lengthM: Math.round(r.len), pts: r.pts.map(([x, y], j) => [...m(x, y), r.profile ? +r.profile[j].toFixed(1) : null]), structures: st };
     }),
+    areasFormat: 'outlines in metres from the north-west corner; closed = a loop, open = runs off the map edge', areas: worldAreas().map(o => ({ kind: o.kind, name: o.name, closed: o.closed, pts: o.pts.map(([x, y]) => [Math.round(x), Math.round(y)]) })),
     alienCorridors: S.corridors.map(c => ({ from: c.from, widthM: Math.round(S.corW), pts: c.pts.map(([x, y]) => m(x, y)) })),
     noRoadAccess: S.stats.unreachable, roadAccessReview: S.roadAccessReview, metro: S.metro,
     settlements: S.pois.filter(p => p.radius).map(p => ({ id: p.id, name: p.name, type: p.type, layout: p.layout, center: m(p.x, p.y), radiusM: Math.round(p.radius), axisAngle: +p.angle.toFixed(3), blockM: p.block })),
@@ -671,6 +936,8 @@ async function exportTerrainTiles(world, { engine, count, x, y, N }, all, emit =
   if (!unity) metadata.unreal = {
     scale: [sampleSpacingMeters * 100, sampleSpacingMeters * 100, verticalRangeMeters * 100 / 512],
     locationZCm: (world.hmin + world.hmax) * 50,
+    // the import panel places the stitched landscape by its centre; this puts the north-west corner at 0, 0
+    importLocationCm: [world.sizeM * 50, world.sizeM * 50, (world.hmin + world.hmax) * 50],
     quadsPerSection: 63, sectionsPerComponent: '2x2', componentsPerTile: '8x8'
   };
   const prefix = unity ? 'Assets/Worldforge/Tiles/' : '', files = [];
@@ -679,7 +946,7 @@ async function exportTerrainTiles(world, { engine, count, x, y, N }, all, emit =
     $('status').textContent = `Refining tile ${metadata.tiles.length + 1} of ${tileList.length} (X ${tx}, Y ${ty})…`;
     await new Promise(resolve => setTimeout(resolve, 20));
     const file = `height_x${tx}_y${ty}.${unity ? 'bytes' : 'r16'}`;
-    const bytes = encodeHeightLE(buildHeightTile(world, count, N, tx, ty), world);
+    const bytes = encodeHeightLE(await buildHeightTile(world, count, N, tx, ty), world);
     files.push([prefix + file, new Blob([bytes])]);
     metadata.tiles.push({ x: tx, y: ty, file, eastMeters: tx * tileSizeMeters, southMeters: ty * tileSizeMeters });
     progress.value = metadata.tiles.length;

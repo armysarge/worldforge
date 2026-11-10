@@ -21,7 +21,7 @@ const same = (a, b, at = 'world') => {
 };
 (async () => {
   const fromWorker = await viaWorker(), app = createApp(), inline = await app.api.buildWorld(settings);
-  assert(fromWorker.statuses.length >= 10 && fromWorker.statuses[0].startsWith('1/10'), 'progress messages reach the page');
+  assert(fromWorker.statuses.length >= 10 && fromWorker.statuses[0].startsWith('1/11'), 'progress messages reach the page');
   assert.equal(fromWorker.world.riverW, undefined, 'functions are stripped before posting');
   same(inline.world, fromWorker.world);
   assert(fromWorker.world.h instanceof Float32Array && fromWorker.world.roads.length > 10);

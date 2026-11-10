@@ -28,6 +28,7 @@ const pointOn = ([x, y], pts) => pts.some(([ax, ay], i) => {
   assert.equal(adapterRequests, 1, 'Auto mode attempts WebGPU');
   assert.equal(world.terrainBackend, 'cpu', 'generation completes without a WebGPU adapter');
   assert.equal(data.terrainBackend, 'cpu', 'the world export records the backend used');
+  assert.equal(data.roadScreeningBackend, 'cpu', 'road screening also falls back when no adapter is available');
   const settlements = new Map(world.pois.filter(p => p.radius).map(p => [p.id, p]));
   const city = [...settlements.values()].find(p => p.type === 'city');
   assert(city && world.streets.filter(s => s.town === city.id).length >= 12, 'the default city can grow multiple blocks');
@@ -79,14 +80,14 @@ const pointOn = ([x, y], pts) => pts.some(([ax, ay], i) => {
     chanM: channel.slice().fill(1, 2 * n, 3 * n),
     rivers: [[[0, 2, 1, 0], [10, 2, 1, 0]]], riverW: () => 1, riverD: () => .4,
   };
-  const nw = buildHeightTile(sampleWorld, 2, N, 0, 0), ne = buildHeightTile(sampleWorld, 2, N, 1, 0), sw = buildHeightTile(sampleWorld, 2, N, 0, 1);
+  const nw = await buildHeightTile(sampleWorld, 2, N, 0, 0), ne = await buildHeightTile(sampleWorld, 2, N, 1, 0), sw = await buildHeightTile(sampleWorld, 2, N, 0, 1);
   for (let i = 0; i < N; i++) {
     assert.equal(nw[i * N + N - 1], ne[i * N], 'east and west edge heights match');
     assert.equal(nw[(N - 1) * N + i], sw[i], 'north and south edge heights match');
   }
   assert.equal(ne[26 * N], 0, 'the exported river cuts across the seam');
   assert.equal(ne[64 * N + 12], 5, 'the building pad is flat across the seam');
-  const open = buildHeightTile({...sampleWorld, mainland: true}, 2, N, 1, 0);
+  const open = await buildHeightTile({...sampleWorld, mainland: true}, 2, N, 1, 0);
   assert.equal(open[26 * N + 64], 0, 'the mainland channel reaches the exported outermost vertex');
 
   const readArchive = async blob => {

@@ -1,6 +1,6 @@
 "use strict";
 
-// Requires core.js, hydrology.js and baseterrain.js (loaded first by index.html).
+// Requires core.js, hydrology.js, baseterrain.js and roadcompute.js (loaded first by index.html).
 
 // ---------- generator ----------
 const SYL = ['ar','bel','cor','dun','el','fen','gar','hol','ket','lor','mar','nor','os','pen','rav','sel','tor','ul','vin','wyn','cal','bra','dra','hen'];
@@ -14,15 +14,19 @@ const SLICE_M = 2000, DEV_M = 1225;         // docs: vertical slice ~4 km², fir
 
 // Settings that drive generation. Read from the form on the main thread; buildWorld itself never touches the DOM,
 // so it can run in a Web Worker (js/worker.js).
-const GEN_SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms', 'hydraulic'];
+const GEN_SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms', 'hydraulic', 'pois', 'splines'];
 const readGenSettings = () => Object.fromEntries(GEN_SETTING_IDS.map(id => [id, $(id).value]));
 // river width/depth from catchment: plain functions can't cross the worker boundary, so they are rebuilt from riverT and ez
 function attachRiverFns(world) {
   const { riverT: T, ez } = world;
-  world.riverW = a => 2 + 2.5 * Math.sqrt(a);
-  world.riverD = a => Math.min(30, 3 + 4 * Math.log2(Math.max(1, a / T))) * ez;
+  world.riverW = riverWidthM;
+  world.riverD = a => riverDepthM(a, T, ez);
   return world;
 }
+// channel size from catchment a (km²): width in metres; bankfull depth grows with the logarithm of the catchment and with the
+// footprint's relief scale ez, and stays shallow next to the width so banks read as banks, not as a trench
+const riverWidthM = a => 2 + 2.5 * Math.sqrt(a);
+const riverDepthM = (a, T, ez) => Math.max(.5, Math.min(12, 1.2 + 1.7 * Math.log2(Math.max(1, a / T))) * ez);
 class GenerationCancelled extends Error { constructor() { super('Generation cancelled'); this.name = 'GenerationCancelled'; } }
 
 async function buildWorld(settings, onStatus = () => {}) {
@@ -50,7 +54,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   const pick = a => a[R() * a.length | 0];
 
   // 1. coastline + mountains ------------------------------------------
-  await status('1/10 Base terrain…');
+  await status('1/11 Base terrain…');
   // island outline = smooth union of elliptical blobs (minus cut-outs), picked per archetype
   const shape = val('shape') === 'random' ? pick(SHAPES) : val('shape');
   const A = R() * 6.2832, ca = Math.cos(A), sa = Math.sin(A), add = [], sub = [], mainland = MAINLAND[shape];
@@ -110,13 +114,57 @@ async function buildWorld(settings, onStatus = () => {}) {
   const terrainBackend = accelerated ? 'webgpu' : 'cpu', terrainSeconds = (performance.now() - baseStart) / 1000;
   const terrainComputeLabel = accelerated ? 'WebGPU' : useGPU ? 'CPU fallback' : 'CPU';
 
+  // ---- hand-drawn splines (Draw panel): [{ t: 'ridge' | 'valley' | 'river' | 'road', p: [[u, v], ...] in 0..1 of the map,
+  // w: width in metres, a: strength 1..10 }]. Ridges, valleys and river courses reshape the base terrain here, before erosion,
+  // lakes and drainage, so everything downstream (rivers, biomes, roads, towns) responds to them. Roads are routed later.
+  let userSplines = []; try { const v = JSON.parse(val('splines') || '[]'); if (Array.isArray(v)) userSplines = v.filter(q => q && Array.isArray(q.p) && q.p.length > 1); } catch { /* bad link data: ignore */ }
+  const injectAcc = [];                                                  // [cell, km² of extra catchment]: makes a drawn river a river from its source
+  const splineLine = q => {                                              // drawn vertices -> a smooth line sampled about every half cell, in grid coordinates
+    let pts = q.p.map(([u, v]) => [clamp(u, 0, 1) * (n - 1), clamp(v, 0, 1) * (n - 1)]);
+    for (let it = 0; it < 2 && pts.length > 2; it++) { const o = [pts[0]]; for (let j = 0; j < pts.length - 1; j++) { const a = pts[j], b = pts[j + 1]; o.push([a[0] * .75 + b[0] * .25, a[1] * .75 + b[1] * .25], [a[0] * .25 + b[0] * .75, a[1] * .25 + b[1] * .75]); } o.push(pts.at(-1)); pts = o; }
+    const out = [pts[0]];
+    for (let j = 1; j < pts.length; j++) { const a = pts[j - 1], b = pts[j], c = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) * 2)); for (let k = 1; k <= c; k++) out.push([lerp(a[0], b[0], k / c), lerp(a[1], b[1], k / c)]); }
+    return out;
+  };
+  // nearest line sample and distance (cells) for every cell within `radius` cells of the line
+  const nearLine = (line, radius, visit) => {
+    const best = new Map(), rc = Math.ceil(radius), r2 = radius * radius;
+    for (let k = 0; k < line.length; k++) { const [px, py] = line[k];
+      for (let y = Math.max(0, Math.floor(py - rc)); y <= Math.min(n - 1, Math.ceil(py + rc)); y++) for (let x = Math.max(0, Math.floor(px - rc)); x <= Math.min(n - 1, Math.ceil(px + rc)); x++) {
+        const d2 = (x - px) * (x - px) + (y - py) * (y - py); if (d2 > r2) continue; const i = y * n + x, b = best.get(i); if (!b || d2 < b[0]) best.set(i, [d2, k]); } }
+    for (const [i, [d2, k]] of best) visit(i, Math.sqrt(d2), k);
+  };
+  for (const q of userSplines) {
+    if (q.t !== 'ridge' && q.t !== 'valley') continue;
+    const line = splineLine(q), wc = Math.max(2, (q.w || 400) / cell), amount = clamp(q.a || 4, 1, 10) * 100 * ez * (q.t === 'valley' ? -1 : 1), L = line.length - 1;   // up to 1000 m on a 100 km map, 250 m on 10 km
+    nearLine(line, wc * 1.6, (i, d, k) => {
+      const x = i % n, y = i / n | 0, ends = sstep(0, .12, k / L) * sstep(0, .12, 1 - k / L);          // tapers out at both ends
+      const rough = .8 + .3 * noise(x * .045 + 900, y * .045 + 900) + .15 * noise(x * .16 + 40, y * .16 + 40);   // a crest that rises and dips, not a wall
+      const nh = h[i] + amount * Math.exp(-2.4 * (d / wc) * (d / wc)) * ends * rough;
+      h[i] = amount < 0 && h[i] > 1 ? Math.max(1, nh) : nh;                          // a valley lowers land but never floods it
+    });
+  }
+  for (const q of userSplines) {
+    if (q.t !== 'river') continue;
+    let line = splineLine(q); const at = ([x, y]) => h[Math.round(y) * n + Math.round(x)];
+    if (at(line.at(-1)) > at(line[0])) line = line.reverse();                // water runs from the higher end to the lower
+    const g0 = at(line[0]), gEnd = at(line.at(-1)); if (g0 <= 1) continue;   // a source in the sea is not a river
+    const L = line.length - 1, zEnd = gEnd <= 0 ? -1 : Math.min(gEnd, g0 - 1), cut = Math.max(1.5, 4 * ez), bed = new Float32Array(L + 1);
+    let run = Infinity;                                                      // a bed that only ever falls, at or below the ground it crosses
+    for (let k = 0; k <= L; k++) { run = Math.min(run, lerp(g0, zEnd, k / L), at(line[k]) - cut); bed[k] = Math.max(run, -1); }
+    const R0 = Math.max(3, (q.w || 300) / cell), rise = Math.max(3 * ez, R0 * cell * .08);     // valley sides climb about 8% away from the bed
+    nearLine(line, R0, (i, d, k) => { if (h[i] <= -1) return; const nh = lerp(h[i], bed[k] + d / R0 * rise, 1 - sstep(.35, 1, d / R0)); if (nh < h[i]) h[i] = nh; });
+    const src = Math.round(line[0][1]) * n + Math.round(line[0][0]), size = clamp(q.a || 4, 1, 10);
+    injectAcc.push([src, (size <= 3 ? 2 : size <= 7 ? 10 : 45) * 8 / dens * sc * sc]);      // stream, river or major river (multiples of the river threshold)
+  }
+
   // erosion (optional): stream-power river incision and slope relaxation on the base terrain, before lakes and rivers are laid out
   const EROSION = { light: { iterations: 15, strength: .15 }, strong: { iterations: 30, strength: .4 } }[val('hydraulic')];
   let erosionInfo = null;
-  if (EROSION) { await status('1/10 Erosion…'); erosionInfo = { level: val('hydraulic'), ...erodeTerrain(h, n, cell, EROSION) }; }
+  if (EROSION) { await status('1/11 Erosion…'); erosionInfo = { level: val('hydraulic'), ...erodeTerrain(h, n, cell, EROSION) }; }
 
   // lake basins carved into valleys
-  await status('2/10 Lake basins…');
+  await status('2/11 Lake basins…');
   const lakeSites = [], gradMax = .1 * Math.max(1, ez / sc);
   for (let tries = 0; tries < 6000 && lakeSites.length < nLakes; tries++) {
     const x = (.1 + R() * .8) * (n - 1) | 0, y = (.1 + R() * .8) * (n - 1) | 0, i = y * n + x;
@@ -131,16 +179,18 @@ async function buildWorld(settings, onStatus = () => {}) {
   }
 
   // 2. hydrology: priority-flood fill, flow routing, accumulation -------
-  await status('3/10 Rivers & lakes…');
+  await status('3/11 Rivers & lakes…');
   const { fl, flow, order, oc } = priorityFlood(h, n);
   const acc = new Float32Array(N2);                              // catchment, km² (rain-weighted)
   for (let i = 0; i < N2; i++) acc[i] = h[i] > 0 ? cellKm2 * (1 + h[i] / (2500 * ez)) : 0;
+  for (const [c, a] of injectAcc) if (h[c] > 0) acc[c] += a;
   for (let k = oc - 1; k >= 0; k--) { const c = order[k], p = flow[c]; if (p >= 0) acc[p] += acc[c]; }
 
   // water classification from a filled surface: ocean = drains to the map edge below sea level; a lake = every cell of a
   // closed basin lying below that basin's spill level (so its water level is exactly where it would overflow)
   const ocean = new Uint8Array(N2), lakeId = new Uint16Array(N2), lakes = [], land = new Uint8Array(N2);
-  const lakeAreaMin = (mainland ? 8 : 2.5) * sc * sc, lakeDepthMin = (mainland ? 12 : 6) * ez;
+  const lakeAreaMin = nLakes === 0 ? Infinity : (mainland ? 8 : 2.5) * sc * sc,   // Lakes at 0: natural hollows are filled too
+        lakeDepthMin = (mainland ? 12 : 6) * ez;
   const classifyWater = fl => {
     lakeId.fill(0); lakes.length = 0;
     for (let i = 0; i < N2; i++) ocean[i] = fl[i] <= 0 ? 1 : 0;
@@ -163,11 +213,13 @@ async function buildWorld(settings, onStatus = () => {}) {
   };
   classifyWater(fl);
   // erosion detail: every flow line is carved a little, deeper with catchment → dendritic gullies
-  // (only real drainage lines; hillslope sheet-flow cells would carve parallel D8 stripes), softened by a 1-cell blur
+  // (only real drainage lines; hillslope sheet-flow cells would carve parallel D8 stripes). Flow lines step cell to cell,
+  // so the cut is spread into a smooth five-cell valley (two blur passes) instead of a one-cell slot: slots turn into
+  // strings of pits and bumps once the grid is upsampled for export.
   const aT = Math.max(sc * sc * .05, cellKm2 * 12), ero = new Float32Array(N2), erosion = terrainSettings.erosion / .3;
-  for (let i = 0; i < N2; i++) if (land[i] && acc[i] > aT) ero[i] = ez * Math.min(20, 3 * Math.log2(acc[i] / aT)) * erosion;
-  const eroB = blur(ero, n, 1);
-  for (let i = 0; i < N2; i++) if (land[i]) h[i] = Math.max(Math.min(h[i], .5), h[i] - Math.max(eroB[i], ero[i] * .6));
+  for (let i = 0; i < N2; i++) if (land[i] && acc[i] > aT) ero[i] = ez * Math.min(20, 3 * Math.log2(acc[i] / aT)) * erosion * .5;   // halved: the default used to gully every slope
+  const eroB = blur(blur(ero, n, 1), n, 1), eroCap = ez * 7 * erosion;
+  for (let i = 0; i < N2; i++) if (land[i]) h[i] = Math.max(Math.min(h[i], .5), h[i] - Math.min(eroB[i] * 1.5, eroCap));
 
   // reality rule: water is re-solved on the eroded surface BEFORE rivers are traced. Lakes = closed basins filled exactly
   // to their spill level; every hollow too small to be a lake is filled, so all water reaches the sea or a lake.
@@ -177,6 +229,7 @@ async function buildWorld(settings, onStatus = () => {}) {
     for (let i = 0; i < N2; i++) if (!ocean[i] && !lakeId[i] && r2.fl[i] > h[i]) { h[i] = r2.fl[i]; reality.pitsFilled++; }
     flow.set(r2.flow); acc.fill(0);                               // drainage + catchment on the final water surface
     for (let i = 0; i < N2; i++) acc[i] = h[i] > 0 ? cellKm2 * (1 + h[i] / (2500 * ez)) : 0;
+    for (const [c, a] of injectAcc) if (h[c] > 0) acc[c] += a;
     for (let k = r2.oc - 1; k >= 0; k--) { const c = r2.order[k], p = flow[c]; if (p >= 0) acc[p] += acc[c]; }
   }
   // lake rims: river banks and road cuts may never lower ground beside a lake below its water level (it would drain)
@@ -192,7 +245,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   // smooth (Chaikin), then carve the curved channel into the heightmap so terrain matches the drawn river
   const up = new Uint8Array(N2), traced = new Uint8Array(N2), rivers = [];
   for (let i = 0; i < N2; i++) if (riv[i] && flow[i] >= 0 && riv[flow[i]]) up[flow[i]] = 1;
-  const depthOf = a => Math.min(30, 3 + 4 * Math.log2(Math.max(1, a / T))) * ez, widthOf = a => 2 + 2.5 * Math.sqrt(a);   // metres
+  const depthOf = a => riverDepthM(a, T, ez), widthOf = riverWidthM;   // metres
   const MF = 1 / 18;
   for (let s0 = 0; s0 < N2; s0++) {
     if (!riv[s0] || up[s0]) continue;
@@ -226,6 +279,19 @@ async function buildWorld(settings, onStatus = () => {}) {
       const xi = Math.round(q[0]), yi = Math.round(q[1]); if (xi < 1 || yi < 1 || xi >= n - 1 || yi >= n - 1) continue;
       let m = Infinity; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const i = (yi + dy) * n + xi + dx; m = Math.min(m, lakeId[i] ? lakes[lakeId[i] - 1].level : ocean[i] ? 0 : h[i]); }
       lowT = Math.min(lowT, m); q[3] = Math.min(q[3], lowT - .2);
+    }
+    // the clamp above lowers the bed in cell-sized jumps, which carve into a staircase of round pools down every falling
+    // stream. Replace each bed level with the mean of the next cell and a half downstream: a mean of lower-or-equal values,
+    // so the bed is only ever lowered and still never rises downstream, and every jump becomes a ramp. The mean stops
+    // short of single drops of 3 m or more, which keeps the lip of rapids and waterfalls.
+    {
+      const L = p.length, b0 = p.map(q => q[3]), win = 12;
+      for (let j = 1; j < L; j++) if (b0[j] > b0[j - 1]) b0[j] = b0[j - 1];     // points the clamp skipped at the map edge
+      for (let j = 0; j < L; j++) {
+        let sum = b0[j], c = 1;
+        for (let k = j + 1; k <= Math.min(L - 1, j + win) && b0[k - 1] - b0[k] < 3; k++) { sum += b0[k]; c++; }
+        p[j][3] = sum / c;
+      }
     }
     if (exitsMap) {
       p.at(-1)[3] = Math.min(p.at(-1)[3], p.at(-2)[3]);
@@ -262,6 +328,7 @@ async function buildWorld(settings, onStatus = () => {}) {
       }
       if (made) deltaCount++;
     }
+    const fp0 = h.slice();
     for (const p of rivers) for (let j = 0; j < p.length - 1; j++) {
       const [x0, y0, a, b0] = p[j], [x1, y1, , b1] = p[j + 1]; if (a < 6 * T) continue;
       if ((b0 - b1) / ((Math.hypot(x1 - x0, y1 - y0) || 1) * cell) > .02) continue;        // lowland reaches only (under 2% fall)
@@ -271,22 +338,29 @@ async function buildWorld(settings, onStatus = () => {}) {
           const i = y * n + x; if (ocean[i] || lakeId[i]) continue;
           const t = clamp(((x - x0) * sx + (y - y0) * sy) / (sx * sx + sy * sy || 1), 0, 1), d = Math.hypot(x - x0 - t * sx, y - y0 - t * sy); if (d >= W) continue;
           const target = Math.max(lerp(b0, b1, t) + 1.5 + 2 * d / W, rimL[i], .6);
-          if (h[i] <= target || h[i] > target + wall) continue;         // already low, or a valley wall / terrace: leave it
-          const nh = lerp(h[i], target, 1 - sstep(.6, 1, d / W));
+          const g0 = fp0[i]; if (g0 <= target || g0 > target + wall) continue;   // already low, or a valley wall / terrace: leave it
+          // ground a little above the plain is flattened; the closer it stands to valley-wall height the less it is cut,
+          // so the plain meets the wall in a slope rather than a vertical step. Always measured from the ground as it was
+          // before any floodplain (fp0): the many overlapping river segments would otherwise each cut a little more.
+          const nh = lerp(g0, target, (1 - sstep(.6, 1, d / W)) * (1 - sstep(.25 * wall, wall, g0 - target)));
           if (nh < h[i]) { h[i] = nh; if (!floodM[i]) { floodM[i] = 1; floodCells++; } }
         }
     }
   }
   reality.deltas = deltaCount; reality.floodplainKm2 = floodCells * cellKm2;
   const chanM = new Uint8Array(N2);                               // the carved (meandered) channel: roads must bridge it, never fill it
+  // carveD = how far each cell was lowered by the channel carve. Exports add it back before upsampling and re-cut the
+  // channel at export resolution, so banks come out smooth instead of inheriting the grid's stair-steps.
+  const carveD = h.slice();
   carveRivers(h, n, cell, rivers, 1, widthOf, depthOf, i => rimL[i], chanM, { openEdge: !!mainland });
+  for (let i = 0; i < N2; i++) carveD[i] = Math.max(0, carveD[i] - h[i]);
   if (landforms) for (let i = 0; i < N2; i++) if (chanM[i] && floodM[i]) { floodM[i] = 0; floodCells--; }   // the floodplain is the land beside the channel
   reality.floodplainKm2 = floodCells * cellKm2;
   // channels follow the drainage so they never create a basin; fill any interpolation hollows they left
   { const r3 = priorityFlood(h, n); for (let i = 0; i < N2; i++) if (land[i] && r3.fl[i] > h[i]) { h[i] = r3.fl[i]; reality.pitsFilled++; } }
 
   // derived rasters ------------------------------------------------------
-  await status('4/10 Slopes, biomes, shading…');
+  await status('4/11 Slopes, biomes, shading…');
   const slope = new Float32Array(N2), shade = new Float32Array(N2).fill(1);
   const deriveSlope = () => {
     const margin = mainland ? 0 : 1;
@@ -318,7 +392,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   const flatB = m => B('f', flatArr, m), forB = m => B('o', forArr, m), mtnB = m => B('m', mtnArr, m), ocnB = m => B('c', ocnArr, m);
 
   // 3. settlements -------------------------------------------------------
-  await status('5/10 Settlements, farms, start region…');
+  await status('5/11 Settlements, farms, start region…');
   const used = new Set(), nm = () => { let s; do { s = cap(pick(SYL)) + (R() < .5 ? pick(SYL) : '') + pick(SUF); } while (used.has(s)); used.add(s); return s; };
   const short = () => cap(pick(SYL)) + pick(SYL);
   let alpha = 0;
@@ -359,18 +433,35 @@ async function buildWorld(settings, onStatus = () => {}) {
   const nearKm = (x, y, types) => { let m = Infinity; for (const p of pois) if (!types || types.includes(p.type)) m = Math.min(m, Math.hypot(p.x - x, p.y - y) * cell / 1000); return m; };
   const ctr = (x, y) => 1 - Math.hypot(x / n - .5, y / n - .5) * 2;
   const stride = Math.max(1, Math.round(n / 250)), NEG = -Infinity, reach = new Uint8Array(N2).fill(1);
+  // Places setting: full (default), few (about a third), random (each kind of place gets its own seeded share, some kinds
+  // none at all) or none (terrain, rivers and lakes only). Counts are scaled here, where every site is chosen.
+  const poiMode = val('pois') || 'full', poiRand = mulberry(hashSeed(seedStr + '/places')), poiShare = {};
+  const poiCount = (type, count) => {
+    if (poiMode === 'none') return 0;
+    if (poiMode === 'few') return type === 'city' ? count : Math.ceil(count * .35);
+    if (poiMode === 'random') { poiShare[type] ??= poiRand() < .25 ? 0 : .3 + poiRand() * 1.2; return Math.round(count * poiShare[type]); }
+    return count;
+  };
+  // Scores are worked out once per call (they do not change while the call places its sites), then each site takes the best
+  // remaining cell that keeps its distance from what is already placed. Scoring every cell again for every site was the
+  // single largest cost of generation.
   function place(type, count, score, min = 0, avoid = null, st = stride, anyCell = false) {
-    const out = [];
+    const out = []; count = poiCount(type, count); if (count <= 0) return out;
+    const cells = [], vals = [];
+    for (let y = st; y < n - st; y += st) for (let x = st; x < n - st; x += st) {
+      const i = y * n + x; if ((!land[i] || !reach[i]) && !anyCell) continue;
+      const s = score(i, x, y) + R() * .3; if (s > NEG) { cells.push(i); vals.push(s); }
+    }
+    const minCells = min * 1000 / cell, taken = new Uint8Array(cells.length);
     for (let k = 0; k < count; k++) {
-      let best = NEG, bi = -1;
-      for (let y = st; y < n - st; y += st) for (let x = st; x < n - st; x += st) {
-        const i = y * n + x; if ((!land[i] || !reach[i]) && !anyCell) continue;
-        const s = score(i, x, y) + R() * .3; if (!(s > best)) continue;
-        let ok = true;
-        for (const p of pois) if ((!avoid || avoid.includes(p.type)) && Math.hypot(p.x - x, p.y - y) * cell / 1000 < min) { ok = false; break; }
-        if (ok) { best = s; bi = i; }
+      let best = NEG, bj = -1;
+      for (let j = 0; j < cells.length; j++) {
+        if (taken[j] || !(vals[j] > best)) continue;
+        const x = cells[j] % n, y = cells[j] / n | 0; let ok = true;
+        for (const p of pois) if ((!avoid || avoid.includes(p.type)) && Math.hypot(p.x - x, p.y - y) < minCells) { ok = false; break; }
+        if (ok) { best = vals[j]; bj = j; } else taken[j] = 1;        // too close now means too close for the rest of the call
       }
-      if (bi < 0) break; out.push(P(type, bi));
+      if (bj < 0) break; taken[bj] = 1; out.push(P(type, cells[bj]));
     }
     return out;
   }
@@ -414,29 +505,18 @@ async function buildWorld(settings, onStatus = () => {}) {
     for (let i = 0; i < N2; i++) forArr[i] = biome[i] === 3 ? 1 : 0;
     for (const key of Object.keys(bl)) if (key[0] === 'o') delete bl[key];                     // forest blurs are stale now
   }
-  // farmland grading: every field plot (the same patchwork the map draws) is levelled to a near-flat plane — at most 1.5°,
-  // what farm machinery works — so fields step gently down a hillside with soft banks between plots (terraces on steeper
-  // ground). Rivers, drainage lines (field ditches) and lake shores are left alone; field edges feather into the ground.
+  // farmland grading: farming does not move hills. Ploughing only takes the edge off small bumps, so each field cell moves
+  // 30% of the way towards the average of the field ground around it (about 50 m); the change fades out over the last 40 m
+  // before the field edge, a drainage line, a river bank or a lake shore. Nothing is levelled to a separate plane, so
+  // there is no step or rim along field outlines or between neighbouring plots.
   {
-    const fm = new Float32Array(N2);
-    for (let i = 0; i < N2; i++) fm[i] = (biome[i] === 9 || sitePrep[i]) && !riv[i] && !chanM[i] && acc[i] < aT && !(rimL[i] > -Infinity) ? 1 : 0;
-    const fsz = Math.max(160, cell * 3) / cell, fc = Math.cos(.5), fsn = Math.sin(.5), MAXT = Math.tan(1.5 / 57.3);
-    const plot = i => { const x = i % n, y = i / n | 0; return Math.floor((x * fc + y * fsn) / fsz) * 100003 + Math.floor((y * fc - x * fsn) / fsz); };
-    const P2 = new Map();                                                                         // per plot: least-squares plane of the ground
-    for (let i = 0; i < N2; i++) if (fm[i]) { const k = plot(i), x = i % n, y = i / n | 0; let a = P2.get(k); if (!a) P2.set(k, a = [0, 0, 0, 0, 0, 0, 0, 0]);
-      a[0]++; a[1] += x; a[2] += y; a[3] += h[i]; a[4] += x * x; a[5] += y * y; a[6] += x * h[i]; a[7] += y * h[i]; }
-    const PL = new Map(); let terraced = 0;
-    for (const [k, a] of P2) {
-      const c = a[0], mx = a[1] / c, my = a[2] / c, mh = a[3] / c, vx = a[4] / c - mx * mx, vy = a[5] / c - my * my;
-      let gx = vx > .01 ? (a[6] / c - mx * mh) / vx / cell : 0, gy = vy > .01 ? (a[7] / c - my * mh) / vy / cell : 0;   // m per m
-      const tg = Math.hypot(gx, gy); if (tg > MAXT) { gx *= MAXT / tg; gy *= MAXT / tg; } if (tg > Math.tan(4 / 57.3)) terraced += c;
-      PL.set(k, [mx, my, mh, gx, gy]);
-    }
-    const tgt = new Float32Array(h);
-    for (let i = 0; i < N2; i++) if (fm[i]) { const [mx, my, mh, gx, gy] = PL.get(plot(i)); tgt[i] = Math.max(.5, mh + ((i % n) - mx) * cell * gx + ((i / n | 0) - my) * cell * gy); }
-    const soft = blur(tgt, n, 1), wB = blur(fm, n, Math.max(1, Math.round(30 / cell)));             // soft banks between plots, feathered edges
-    for (let i = 0; i < N2; i++) if (fm[i]) h[i] = lerp(h[i], soft[i] * .15 + tgt[i] * .85, clamp(wB[i] * 1.6, 0, 1));   // narrow banks, mostly level plots
-    reality.farmTerracedKm2 = terraced * cellKm2;
+    const fm = new Float32Array(N2), notField = new Uint8Array(N2);
+    for (let i = 0; i < N2; i++) { fm[i] = (biome[i] === 9 || sitePrep[i]) && !riv[i] && !chanM[i] && !carveD[i] && !(rimL[i] > -Infinity) ? 1 : 0; notField[i] = fm[i] ? 0 : 1; }
+    const dEdge = chamfer(n, cell, notField), R = Math.max(1, Math.round(50 / cell)), hf = new Float32Array(N2);
+    for (let i = 0; i < N2; i++) hf[i] = fm[i] * h[i];
+    const num = blur(blur(hf, n, R), n, R), den = blur(blur(fm, n, R), n, R), feather = Math.max(40, 3 * cell);
+    for (let i = 0; i < N2; i++) if (fm[i] && den[i] > .05) h[i] = Math.max(.5, lerp(h[i], num[i] / den[i], .3 * sstep(0, feather, dEdge[i])));
+    reality.farmTerracedKm2 = 0;
     // shaping can leave hollows: fill them so every field drains to a ditch or stream
     const rf = priorityFlood(h, n); for (let i = 0; i < N2; i++) if (land[i] && rf.fl[i] > h[i]) { h[i] = rf.fl[i]; reality.pitsFilled++; }
     deriveSlope();
@@ -472,7 +552,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   }
 
   // 4. facilities ---------------------------------------------------------
-  await status('6/10 Facilities & landmarks…');
+  await status('6/11 Facilities & landmarks…');
   place('harbor', cnt(1 + 2 * sq), (i, x, y) => !(dO[i] <= cell * 1.5) || slope[i] > 6 ? NEG :
     flatB(M(1500))[i] * 2 + (1 - Math.abs(ocnB(M(4000))[i] - .35) * 3) - nearKm(x, y, ['city', 'town']) / M(15), M(18), ['harbor']);
   if (sc >= .3) {
@@ -584,7 +664,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   { const tt = pois.filter(p => p.type === 'town' && !p.start); if (tt.length) { const t = pick(tt); placeNear('trader', t, 0, t.radius); } }
 
   // 5. roads, barriers, corridors -------------------------------------
-  await status('7/10 Road network…');
+  await status('7/11 Road network…');
   const base = new Float32Array(N2), cost = new Float32Array(N2);
   // reality rule: nothing is routed across cliffs (> 48°); roads and trails go around
   for (let i = 0; i < N2; i++) base[i] = land[i] && slope[i] <= 48 ? 1 + (slope[i] / 8) ** 2 + h[i] / (1500 * ez) + [0, 2, 10, 30][riv[i]] : Infinity;
@@ -592,9 +672,9 @@ async function buildWorld(settings, onStatus = () => {}) {
   // otherwise a valley road finds the free, flat river corridor and runs along (or on top of) the river instead of bridging it
   const chanList = []; for (let i = 0; i < N2; i++) if (chanM[i]) { chanList.push(i); base[i] += 20; }
   cost.set(base);
-  const G = new Float32Array(N2), FROM = new Int32Array(N2), CL = new Uint8Array(N2);
+  const G = new Float32Array(N2), FROM = new Int32Array(N2), CL = new Uint8Array(N2); let routeFull = true;   // routeFull: the shared search arrays need a whole-grid reset
   function astar(a, b, cst, H) {
-    G.fill(Infinity); FROM.fill(-1); CL.fill(0);
+    G.fill(Infinity); FROM.fill(-1); CL.fill(0); routeFull = true;
     const bx = b % n, by = b / n | 0, q = heap(); G[a] = 0; q.push(0, a);
     while (q.size) {
       const c = q.pop(); if (CL[c]) continue; CL[c] = 1; if (c === b) break;
@@ -624,15 +704,32 @@ async function buildWorld(settings, onStatus = () => {}) {
   // real construction — a tunnel ~25× a normal road per metre plus portals, a viaduct ~12× — and never two structures back to
   // back, so winding wins unless a structure clearly pays off
   const JUMPS = { highway: [250, 400], road: [150] }, VIA_MAX = { highway: 300, road: 150 }, TUNNELS = { highway: true, road: false };
-  for (const k in JUMPS) JUMPS[k] = JUMPS[k].map(m => [Math.max(3, Math.round(m / cell)), m]);
+  const jumpGroups = [], typeMasks = { trail: 0 };
+  for (const type of ['highway', 'road']) {
+    typeMasks[type] = 0;
+    JUMPS[type] = JUMPS[type].map(m => {
+      const length = Math.max(3, Math.round(m / cell)), bit = jumpGroups.length * 8;
+      jumpGroups.push([length, GRADE_MAX[type], +TUNNELS[type], +(m <= VIA_MAX[type])]);
+      typeMasks[type] |= 255 << bit;
+      return [length, m, bit];
+    });
+  }
+  let jumpMasks = accelerated ? await buildRoadJumpMasks(n, cell, h, land, riv, slope, base, jumpGroups) : null;
+  const roadScreeningBackend = jumpMasks ? 'webgpu' : 'cpu';
+  const routeCells = new Int32Array(N2); let routeTouched = 0;
   function routeRoad(a, b, type, cst) {
-    const g = GRADE_MAX[type], structures = type !== 'trail';
-    G.fill(Infinity); FROM.fill(-1); CL.fill(0); JT.fill(0);
-    const bx = b % n, by = b / n | 0, q = heap(); G[a] = 0; q.push(0, a);
+    const g = GRADE_MAX[type], typeMask = typeMasks[type];
+    // only the cells the previous search reached are reset (clearing four whole-grid arrays for each of a hundred or more
+    // routes cost more than the searches themselves), and relax is one function for the whole search, not one per cell
+    if (routeFull) { G.fill(Infinity); FROM.fill(-1); CL.fill(0); JT.fill(0); routeFull = false; }      // astar() used the shared arrays in between
+    else for (let t = 0; t < routeTouched; t++) { const i = routeCells[t]; G[i] = Infinity; FROM[i] = -1; CL[i] = 0; JT[i] = 0; }
+    routeTouched = 0;
+    const bx = b % n, by = b / n | 0, q = heap(); let c = a;
+    const relax = (ni, gn, jt) => { if (gn < G[ni]) { if (G[ni] === Infinity) routeCells[routeTouched++] = ni; G[ni] = gn; FROM[ni] = c; JT[ni] = jt; q.push(gn + .5 * Math.hypot(bx - ni % n, by - (ni / n | 0)), ni); } };
+    routeCells[routeTouched++] = a; G[a] = 0; q.push(0, a);
     while (q.size) {
-      const c = q.pop(); if (CL[c]) continue; CL[c] = 1; if (c === b) break;
+      c = q.pop(); if (CL[c]) continue; CL[c] = 1; if (c === b) break;
       const cx = c % n, cy = c / n | 0, hc = h[c];
-      const relax = (ni, gn, jt) => { if (gn < G[ni]) { G[ni] = gn; FROM[ni] = c; JT[ni] = jt; q.push(gn + .5 * Math.hypot(bx - ni % n, by - (ni / n | 0)), ni); } };
       for (let d = 0; d < 8; d++) {
         const nx = cx + DX[d], ny = cy + DY[d]; if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
         const ni = ny * n + nx; if (CL[ni] || !(cst[ni] < 1e8)) continue;
@@ -640,7 +737,9 @@ async function buildWorld(settings, onStatus = () => {}) {
         if (gr > 1.19) continue;                                                      // no step steeper than 50° on any road or path
         relax(ni, G[c] + sd * (cst[c] + cst[ni]) / 2 * (1 + .3 * gr / g + 10 * ex * ex), 0);    // over-grade steps get expensive (grading absorbs short ones)
       }
-      if (structures && slope[c] > 8 && !JT[c]) for (let d = 0; d < 8; d++) for (const [L, Lm] of JUMPS[type]) {   // no structure straight after another
+      const candidates = jumpMasks ? jumpMasks[c] & typeMask : typeMask;
+      if (candidates && slope[c] > 8 && !JT[c]) for (let d = 0; d < 8; d++) for (const [L, Lm, bit] of JUMPS[type]) {
+        if (!(candidates & (1 << (bit + d)))) continue;
         const nx = cx + DX[d] * L, ny = cy + DY[d] * L; if (nx < 1 || ny < 1 || nx >= n - 1 || ny >= n - 1) continue;
         const ni = ny * n + nx; if (CL[ni] || !(cst[ni] < 1e8)) continue;
         const sd = (DX[d] && DY[d] ? 1.4142 : 1) * L, he = h[ni]; if (Math.abs(he - hc) / (sd * cell) > g) continue;
@@ -687,7 +786,8 @@ async function buildWorld(settings, onStatus = () => {}) {
     return rt;
   }
   function link(a, b, type, cst = cost, extra = {}) {
-    if (a === b || linked.has(lkey(a, b))) return; linked.add(lkey(a, b));
+    if (a === b) return;
+    if (!extra.user) { if (linked.has(lkey(a, b))) return; linked.add(lkey(a, b)); }      // drawn roads are not places: always built
     const rt = routeAvoidingChannel(a.i, b.i, type, cst); if (!rt) return false; const path = rt.path; extra = { ...extra, jd: rt.jd };
     if (path.length < 2) { reached.add(a); reached.add(b); return true; }      // two sites in the same cell need no road
     let len = 0; for (let j = 1; j < path.length; j++) { const d = Math.abs(path[j] - path[j - 1]); len += (d === 1 || d === n ? 1 : 1.4142) * cell; }
@@ -695,6 +795,23 @@ async function buildWorld(settings, onStatus = () => {}) {
     for (const j of path) { cost[j] = Math.min(cost[j], base[j] * F_ROAD[type]); roadCell[j] = 1; }
     return true;
   }
+  // hand-drawn roads go in first, so the generated network joins and reuses them. Each one is routed through its drawn
+  // points with the normal road search (grades, bridges, tunnels), on a cost map that gets expensive away from the drawn
+  // line: the road follows the sketch where the ground allows and deviates only where it must.
+  { let count = 0;
+    for (const q of userSplines) {
+      if (q.t !== 'road') continue; count++;
+      const line = splineLine(q), mask = new Uint8Array(N2); for (const [x, y] of line) mask[Math.round(y) * n + Math.round(x)] = 1;
+      const dLine = chamfer(n, cell, mask), cst = new Float32Array(N2);
+      for (let i = 0; i < N2; i++) cst[i] = cost[i] < 1e8 ? cost[i] * (1 + 30 * sstep(1.5 * cell, 14 * cell, dLine[i])) : cost[i];
+      const snap = ([u, v]) => { const x0 = Math.round(clamp(u, 0, 1) * (n - 1)), y0 = Math.round(clamp(v, 0, 1) * (n - 1)); let bi = -1, bd = 1e9;      // nearest buildable cell
+        for (let dy = -8; dy <= 8; dy++) for (let dx = -8; dx <= 8; dx++) { const x = x0 + dx, y = y0 + dy; if (x < 1 || y < 1 || x >= n - 1 || y >= n - 1) continue; const i = y * n + x, d = dx * dx + dy * dy; if (cost[i] < 1e8 && land[i] && d < bd) { bd = d; bi = i; } }
+        return bi; };
+      const type = (q.a || 4) <= 3 ? 'trail' : (q.a || 4) <= 7 ? 'road' : 'highway', stops = q.p.map(snap).filter(i => i >= 0);
+      for (let j = 1; j < stops.length; j++) { if (stops[j] === stops[j - 1]) continue;
+        const end = (i, tag) => ({ i, x: i % n, y: i / n | 0, name: `Drawn ${type} ${count}${stops.length > 2 ? ' ' + tag : ''}` });
+        link(end(stops[j - 1], 'point ' + j), end(stops[j], 'point ' + (j + 1)), type, cst, { user: true, sketchM: Math.hypot(stops[j] % n - stops[j - 1] % n, (stops[j] / n | 0) - (stops[j - 1] / n | 0)) * cell }); }
+    } }
   const nearest = (p, list) => list.filter(q => q !== p).sort((a, b) => dk(p, a) - dk(p, b));
   const major = pois.filter(p => ['city', 'town', 'harbor', 'airport'].includes(p.type));
   if (major.length > 1) {
@@ -743,6 +860,7 @@ async function buildWorld(settings, onStatus = () => {}) {
     }
   }
 
+  jumpMasks = null;
   // realistic horizontal alignment (how an engineer lays a road out): reduce the routed grid path to its real turning points,
   // then join straight tangents with circular curves of the design radius — tighter only where the ground forces it (hairpins).
   // Tunnels and viaducts stay dead straight between their portals.
@@ -828,6 +946,9 @@ async function buildWorld(settings, onStatus = () => {}) {
   // reality rule: roads are graded (cut & fill) to a realistic maximum grade instead of riding every bump.
   // Bridges / culverts: river and drainage cells are left open so roads never dam water; lake rims are never cut.
   {
+    // only gullies carrying a real stream (a quarter of the river threshold or more) are kept open under a road. Every
+    // minor flow line used to count, which left a pothole in the embankment wherever one crossed.
+    const aCulvert = Math.max(aT, T * .25);
     const GRADE = { highway: .08, road: .12, trail: .8 }, RWID = { highway: 12, road: 7, trail: 2.5 }, RANK = { trail: 0, road: 1, highway: 2 };
     const bestD = new Float32Array(N2).fill(Infinity), bestT = new Float32Array(N2), orig = h.slice(), bedM = roadBedM, nearChan = new Float32Array(N2).fill(-Infinity);   // water level of a channel within 2 cells
     for (let i = 0; i < N2; i++) if (chanM[i] || riv[i]) { const x = i % n, y = i / n | 0; for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < n && yy < n) { const j = yy * n + xx; if (!(chanM[j] || riv[j])) nearChan[j] = Math.max(nearChan[j], h[i]); } } }
@@ -863,7 +984,7 @@ async function buildWorld(settings, onStatus = () => {}) {
       // final guarantee: after pins, clearances and straight decks, the road surface itself obeys the grade limit
       for (let j = 1; j < L; j++) z[j] = clamp(z[j], z[j - 1] - g * (dist[j] - dist[j - 1]), z[j - 1] + g * (dist[j] - dist[j - 1]));
       for (let j = L - 2; j >= 0; j--) z[j] = clamp(z[j], z[j + 1] - g * (dist[j + 1] - dist[j]), z[j + 1] + g * (dist[j + 1] - dist[j]));
-      for (let j = 0; j < L; j++) { const dz = z[j] - orig[p[j]]; deck[j] = r.jd[j] ? r.jd[j] : riv[p[j]] || chanM[p[j]] ? 1 : dz > FILL ? 2 : dz < -CUT ? 3 : acc[p[j]] >= aT && dz > 2 ? 4 : 0; }
+      for (let j = 0; j < L; j++) { const dz = z[j] - orig[p[j]]; deck[j] = r.jd[j] ? r.jd[j] : riv[p[j]] || chanM[p[j]] ? 1 : dz > FILL ? 2 : dz < -CUT ? 3 : acc[p[j]] >= aCulvert && dz > 2 ? 4 : 0; }
       // where this road meets an existing one too far above/below to join within its grade: grade-separated crossing (overpass)
       if (r.type !== 'trail') for (let j = 0; j < L; j++) if (!deck[j] && bedM[p[j]] && Math.abs(z[j] - h[p[j]]) > 1) { if (!deck[j - 1] || deck[j - 1] !== 6) reality.overpasses = (reality.overpasses || 0) + 1; deck[j] = 6; }
       // a deep fill or cut shorter than ~30 m is not a viaduct or tunnel: it is built as an embankment / cutting (graded normally)
@@ -877,23 +998,26 @@ async function buildWorld(settings, onStatus = () => {}) {
         if (deck[j] === 3 && deck[j - 1] !== 3) { reality.tunnels++; let e = j; while (e < L && deck[e] === 3) e++; if (e - j > 2) { P('portal', p[j - 1]); P('portal', p[Math.min(L - 1, e)]); }
           reality.maxTunnelM = Math.max(reality.maxTunnelM || 0, dist[Math.min(L - 1, e)] - dist[j - 1]); }
       }
-      const hw = Math.max(.5, RWID[r.type] / 2 / cell), touched = [];
+      // the bed is measured from the laid-out centreline (r.pts), not only from the cell the path steps through, and the
+      // shoulder is at least 1.5 cells: a road stamped cell by cell is a staircase that upsamples into a row of bumps
+      const hw = Math.max(.75, RWID[r.type] / 2 / cell), touched = [], line = r.pts.length === L ? r.pts : null;
       for (let j = 0; j < L; j++) {
         const c = p[j]; if (deck[j]) continue;                               // bridge / viaduct / tunnel: terrain left as is
-        const cx = c % n, cy = c / n | 0, bank = Math.max(1, Math.abs(z[j] - orig[c]) / (.5 * cell)), R2 = Math.ceil(hw + bank);
+        const cx = c % n, cy = c / n | 0, bank = Math.max(1.5, Math.abs(z[j] - orig[c]) / (.5 * cell)), R2 = Math.ceil(hw + bank) + 1;
+        const px = line ? line[j][0] : cx, py = line ? line[j][1] : cy;
         for (let dy = -R2; dy <= R2; dy++) for (let dx = -R2; dx <= R2; dx++) {
           const x = cx + dx, y = cy + dy; if (x < 0 || y < 0 || x >= n || y >= n) continue; const i = y * n + x;
           if (!land[i] || riv[i] || chanM[i]) continue;
-          const d = Math.hypot(dx, dy); if (d > hw + bank || d >= bestD[i]) continue;
+          const d = Math.min(Math.hypot(dx, dy), Math.hypot(x - px, y - py)); if (d > hw + bank || d >= bestD[i]) continue;
           if (bedM[i]) continue;                                              // never reshape a road that is already built
           if (bestD[i] === Infinity) touched.push(i);
           let t = Math.max(d <= hw ? z[j] : lerp(z[j], orig[i], sstep(0, 1, (d - hw) / bank)), rimL[i] + .3, .5);
-          if (acc[i] >= aT) t = Math.min(t, orig[i]);                          // culvert: over a gully the road may cut but never dam it
+          if (acc[i] >= aCulvert) t = Math.min(t, orig[i]);                    // culvert: over a stream gully the road may cut but never dam it
           t = Math.max(t, nearChan[i] + 1);                                    // beside a river: stay ≥ 1 m above the water (a deeper cut would capture it)
           bestD[i] = d; bestT[i] = t;
         }
       }
-      for (const i of touched) { h[i] = bestT[i]; if (bestD[i] <= hw) bedM[i] = 1; bestD[i] = Infinity; }
+      for (const i of touched) { h[i] = bestT[i]; carveD[i] = 0; if (bestD[i] <= hw) bedM[i] = 1; bestD[i] = Infinity; }   // road earthworks replace the river bank there
       // reconcile: wherever the ground could not take the planned surface (gully, junction, rim), a short structure carries it
       const tol = r.type === 'trail' ? 1 : .25;                                // roads must match closely; a footpath is rough
       for (let j = 0; j < L; j++) if (!deck[j] && Math.abs(h[p[j]] - z[j]) > tol) deck[j] = z[j] > h[p[j]] ? 4 : 5;   // short span / retaining wall
@@ -911,7 +1035,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   }
 
   // roadside: fuel stations along highways, warehouses in the rural belt
-  await status('8/10 Passes, bridges, roadside…');
+  await status('8/11 Passes, bridges, roadside…');
   const near = (type, x, y, km) => pois.some(p => p.type === type && Math.hypot(p.x - x, p.y - y) * cell / 1000 < km);
   const hwy = new Uint8Array(N2);
   for (const r of roads) if (r.type === 'highway') {
@@ -991,7 +1115,11 @@ async function buildWorld(settings, onStatus = () => {}) {
         Math.abs(dx * other.c + dy * other.s) < other.hw + hw * cos + hd * sin &&
         Math.abs(-dx * other.s + dy * other.c) < other.hd + hw * sin + hd * cos;
     })) return false;
-    buildings.push({ x, y, w, d, a, kind, z: terrainAt(h, n, cell, x, y), urbanLevel: level });
+    // foundation level: the ground averaged over the footprint, so the pad is cut on the uphill side and filled on the
+    // downhill side instead of being sunk to (or perched on) whatever the centre point happens to be
+    let z = 2 * terrainAt(h, n, cell, x, y);
+    for (const u of [-w / 2, w / 2]) for (const v of [-d / 2, d / 2]) z += terrainAt(h, n, cell, x + u * c - v * s, y + u * s + v * c);
+    buildings.push({ x, y, w, d, a, kind, z: z / 6, urbanLevel: level });
     occupy({ x, y, r, hw, hd, c, s });
     if (level) paintUrban(x, y, r + 10, level);
     return true;
@@ -1197,7 +1325,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   { let cleared = 0; for (let i = 0; i < N2; i++) if (urban[i] && biome[i] === 9) { biome[i] = 2; cleared++; } reality.farmUrbanCleared = cleared; }
 
   // 6. EcologyGrid start state: spread from seed engines along valleys/rivers
-  await status('9/10 EcologyGrid…');
+  await status('9/11 EcologyGrid…');
   const gw = Math.max(2, Math.round(sizeM / ECO_CELL)), eN = gw * gw, eTer = new Int32Array(eN), eCost = new Float32Array(eN);
   for (let gy = 0; gy < gw; gy++) for (let gx = 0; gx < gw; gx++) {
     const tx = Math.min(n - 1, Math.round((gx + .5) * ECO_CELL / cell)), ty = Math.min(n - 1, Math.round((gy + .5) * ECO_CELL / cell)), i = ty * n + tx, e = gy * gw + gx;
@@ -1239,7 +1367,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   // ---------- resources ----------
   // Natural resource areas (0..1 per cell) follow ecology: what grows/lies where it really would. Alien infestation
   // (stage 2–3) degrades native resources and leaves alien biomass instead (Alien_Terraforming.md).
-  await status('Resources…');
+  await status('10/11 Resources…');
   const RES_KEYS = ['softwood', 'hardwood', 'stone', 'clay', 'sand', 'forage', 'herbs', 'game', 'fish', 'crops', 'alien'];
   const res = {}; for (const k of RES_KEYS) res[k] = new Float32Array(N2);
   const urbSrc = new Uint8Array(N2); for (let i = 0; i < N2; i++) urbSrc[i] = urban[i] ? 1 : 0;
@@ -1422,9 +1550,9 @@ async function buildWorld(settings, onStatus = () => {}) {
   { const c = {}; for (const p of pois) p.id = `${p.type}_${String(c[p.type] = (c[p.type] || 0) + 1).padStart(3, '0')}`; }   // stable per seed + settings
   for (const street of streets) { street.town = street.owner.id; delete street.owner; }
   for (const b of buildings) if (b.poi) { b.poiId = b.poi.id; delete b.poi; }
-  const world = { ez, seed: seedStr, scenario, shape, mainland: !!mainland, terrainSettings, terrainBackend, terrainSeconds, sizeM, sc, n, k: Math.max(1, Math.round(2020 / n)), cell, h, ocean, lakeId, lakes, land, riv, acc, flow, rivers, riverW: widthOf, riverD: depthOf, riverT: T, hcache: {}, biome, moist, slope, shade, zone, region, stageT,
-    pois, roads, corridors, corW: M(1500), hmin, hmax, slice, urban, buildings, streets, menuCam, reality, travel, rimL, chanM, floodM, roadBedM, resStats, deposits,
-    res: Object.fromEntries(Object.entries(res).map(([k, a]) => [k, Uint8Array.from(a, v => Math.round(clamp(v, 0, 1) * 255))])),
+  const world = { ez, seed: seedStr, scenario, shape, mainland: !!mainland, terrainSettings, terrainBackend, terrainSeconds, roadScreeningBackend, sizeM, sc, n, k: Math.max(1, Math.round(2020 / n)), cell, h, ocean, lakeId, lakes, land, riv, acc, flow, rivers, riverW: widthOf, riverD: depthOf, riverT: T, hcache: {}, biome, moist, slope, shade, zone, region, stageT,
+    userSplines, pois, roads, corridors, corW: M(1500), hmin, hmax, slice, urban, buildings, streets, menuCam, reality, travel, rimL, chanM, carveD, floodM, roadBedM, resStats, deposits,
+    res: Object.fromEntries(Object.entries(res).map(([k, a]) => { const o = new Uint8Array(N2); for (let i = 0; i < N2; i++) { const v = a[i]; o[i] = v <= 0 ? 0 : v >= 1 ? 255 : Math.round(v * 255); } return [k, o]; })),   // plain loop: Uint8Array.from with a callback took over a second here
     cstep: hmax > 1500 ? 50 : hmax > 600 ? 20 : 10,
     eco: { gw, eTer, eInf, eStage, eSeed },
     stats: { landKm2: landCells * cellKm2, riverKm: rivCells * cell / 1000, peak: peakH, stageCnt, regCnt, landCells, unreachable } };
@@ -1466,7 +1594,7 @@ async function generate() {
   runBuild.cancel = null;
   S = attachRiverFns(world);
   const story = S.scenario === 'desolation', tail0 = performance.now();
-  $('status').textContent = '10/10 Rendering…';
+  $('status').textContent = '11/11 Rendering…';
   const ecologyMode = $('mode').querySelector('[value="ecology"]');
   ecologyMode.hidden = ecologyMode.disabled = !story;
   if (!story && $('mode').value === 'ecology') $('mode').value = 'terrain';

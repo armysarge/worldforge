@@ -249,4 +249,138 @@ function startApp() {
   upgradeMaterialControls();
 }
 
+// ---------- hand-drawn splines ----------
+// Lines sketched on the 2D map that shape the next generation: ridges, valleys, river courses and roads. They live in the
+// hidden #splines field as JSON ([{ t, p: [[u, v], ...], w, a }], points in 0..1 of the map), so they are part of the world's
+// settings: saved worlds and share links carry them, and the generator (buildWorld) reads them like any other setting.
+const SPL = { sel: -1, drawing: null, dragPt: null, text: null, list: [] };
+const SPL_COL = { ridge: '#f59e0b', valley: '#c084fc', river: '#22d3ee', road: '#f8fafc' };
+function splineList() {                       // parsed from the field, so links and saved worlds that set it are picked up
+  const text = $('splines').value || '';
+  if (text !== SPL.text) { SPL.text = text; try { const v = JSON.parse(text || '[]'); SPL.list = Array.isArray(v) ? v : []; } catch { SPL.list = []; } SPL.sel = Math.min(SPL.sel, SPL.list.length - 1); }
+  return SPL.list;
+}
+function saveSplines() { SPL.text = $('splines').value = SPL.list.length ? JSON.stringify(SPL.list.map(q => ({ t: q.t, p: q.p.map(([u, v]) => [+u.toFixed(4), +v.toFixed(4)]), w: q.w, a: q.a }))) : ''; splineInfo(); scheduleOverlay(); }
+function splineLabel(q) {
+  const a = q.a, km = S ? S.sizeM / 1000 : +$('fp').value, ez = Math.min(1, Math.pow(km / 100, .6)), m = Math.round(a * 100 * ez);
+  return q.t === 'ridge' ? `Ridge, about ${m} m high and ${q.w} m wide` : q.t === 'valley' ? `Valley, about ${m} m deep and ${q.w} m wide`
+    : q.t === 'river' ? `${a <= 3 ? 'Stream' : a <= 7 ? 'River' : 'Major river'} in a ${q.w} m wide valley` : a <= 3 ? 'Dirt track' : a <= 7 ? 'Gravel road' : 'Highway';
+}
+function splineInfo() {
+  const list = splineList(), cur = SPL.drawing || list[SPL.sel];
+  const what = cur ? splineLabel(cur) : splineLabel({ t: $('spType').value, w: +$('spWidth').value, a: +$('spAmount').value });
+  $('spInfo').textContent = (SPL.drawing ? `Drawing: ${what} (${SPL.drawing.p.length} points). Double-click or Enter to finish.` : cur ? `Selected: ${what}.` : `Next line: ${what}.`) + ` ${list.length} line${list.length === 1 ? '' : 's'} drawn.`;
+  // a drawn road that had to go a long way round: say so, the sketch crosses ground too steep for that class of road
+  const detours = S ? S.roads.filter(r => r.user && r.len > 2.5 * r.sketchM + 500) : [];
+  if (detours.length && !SPL.drawing) $('spInfo').textContent += ` Note: ${detours.length} drawn road section${detours.length === 1 ? '' : 's'} had to detour (for example ${(detours[0].len / 1000).toFixed(1)} km for a ${(detours[0].sketchM / 1000).toFixed(1)} km sketch) because the ground on the line is too steep. Move the points onto gentler ground or draw it as a dirt track.`;
+  $('spDraw').textContent = SPL.drawing ? 'Finish line' : 'Draw new line';
+  cv.classList?.toggle('drawing', !!SPL.drawing);
+}
+function drawUserSplines(ctx) {               // on the overlay, in base-canvas units (the same space as drawOverlays)
+  if (!S || V3.on) return; const W = S.n * S.k, px = 1 / (ovQ || 1), list = splineList();
+  const all = SPL.drawing ? [...list, SPL.drawing] : list;
+  all.forEach((q, j) => {
+    if (!q.p.length) return; const sel = q === SPL.drawing || j === SPL.sel, col = SPL_COL[q.t] || '#fff';
+    const path = () => { ctx.beginPath(); q.p.forEach(([u, v], k) => k ? ctx.lineTo(u * W, v * W) : ctx.moveTo(u * W, v * W)); };
+    ctx.lineJoin = ctx.lineCap = 'round';
+    if (q.t !== 'road') { ctx.globalAlpha = sel ? .28 : .16; ctx.strokeStyle = col; ctx.lineWidth = Math.max(4 * px, q.w / S.sizeM * W); path(); ctx.stroke(); }   // the band it affects
+    ctx.globalAlpha = 1; ctx.strokeStyle = '#0b0e12'; ctx.lineWidth = (sel ? 6 : 5) * px; path(); ctx.stroke();
+    ctx.strokeStyle = col; ctx.lineWidth = (sel ? 3.5 : 2.5) * px; ctx.setLineDash(q.t === 'road' ? [8 * px, 5 * px] : []); path(); ctx.stroke(); ctx.setLineDash([]);
+    if (sel) for (const [u, v] of q.p) { ctx.beginPath(); ctx.arc(u * W, v * W, 5 * px, 0, 6.2832); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 1.5 * px; ctx.strokeStyle = '#0b0e12'; ctx.stroke(); }
+  });
+}
+const splineUV = e => { const r = cv.getBoundingClientRect(); return [clamp((e.clientX - r.left) / r.width, 0, 1), clamp((e.clientY - r.top) / r.height, 0, 1)]; };
+// a finished line is not left selected, so the controls go back to setting up the next line
+function finishSpline(keep = true) {
+  const d = SPL.drawing; SPL.drawing = null; if (!d) return;
+  if (keep && d.p.length > 1) { splineList().push(d); SPL.sel = -1; saveSplines(); $('status').textContent = 'Line added. Press Apply and regenerate to rebuild the world around it.'; }
+  else { splineInfo(); scheduleOverlay(); }
+}
+function splineHit(e) {                        // nearest drawn point and nearest line under the pointer, in screen pixels
+  const r = cv.getBoundingClientRect(), list = splineList(); let pt = null, line = -1, bp = 11, bl = 9;
+  list.forEach((q, j) => q.p.forEach(([u, v], k) => {
+    const x = r.left + u * r.width, y = r.top + v * r.height, d = Math.hypot(e.clientX - x, e.clientY - y); if (d < bp) { bp = d; pt = [j, k]; }
+    if (k) { const [u0, v0] = q.p[k - 1], d2 = distSeg(e.clientX, e.clientY, r.left + u0 * r.width, r.top + v0 * r.height, x, y); if (d2 < bl) { bl = d2; line = j; } }
+  }));
+  return { pt, line };
+}
+// capture phase: these run before the map's own pan and POI handlers and stop them only when a line is being drawn or edited
+cv.addEventListener('mousedown', e => {
+  if (e.button !== 0 || !S || V3.on) return;
+  if (SPL.drawing) { e.stopImmediatePropagation(); e.preventDefault(); if (e.detail > 1) { finishSpline(); return; } SPL.drawing.p.push(splineUV(e)); splineInfo(); scheduleOverlay(); return; }
+  if (!$('spEdit').checked || !$('drawPanel').open) return;
+  const hit = splineHit(e);
+  if (hit.pt) { e.stopImmediatePropagation(); e.preventDefault(); SPL.sel = hit.pt[0]; SPL.dragPt = hit.pt; splineSync(); }
+  else if (hit.line >= 0) { e.stopImmediatePropagation(); e.preventDefault(); SPL.sel = hit.line; splineSync(); }
+  else if (SPL.sel >= 0) { SPL.sel = -1; splineInfo(); scheduleOverlay(); }
+}, true);
+addEventListener('mousemove', e => { if (SPL.dragPt && S) { const [j, k] = SPL.dragPt; if (SPL.list[j]) { SPL.list[j].p[k] = splineUV(e); scheduleOverlay(); } } });
+addEventListener('mouseup', () => { if (SPL.dragPt) { SPL.dragPt = null; saveSplines(); $('status').textContent = 'Point moved. Press Apply and regenerate to rebuild.'; } });
+addEventListener('keydown', e => {
+  if (!SPL.drawing || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '')) return;
+  if (e.key === 'Enter') finishSpline(); else if (e.key === 'Escape') finishSpline(false); else if (e.key === 'Backspace') { SPL.drawing.p.pop(); splineInfo(); scheduleOverlay(); } else return;
+  e.preventDefault();
+});
+function splineSync() {                        // show the selected line's settings in the controls
+  const q = splineList()[SPL.sel]; if (q) { $('spType').value = q.t; $('spWidth').value = q.w; $('spAmount').value = q.a; }
+  splineInfo(); scheduleOverlay();
+}
+$('spDraw').onclick = () => {
+  if (SPL.drawing) return finishSpline();
+  if (!S) return; if (V3.on) toggle3D();
+  SPL.sel = -1; SPL.drawing = { t: $('spType').value, p: [], w: +$('spWidth').value, a: +$('spAmount').value }; splineInfo();
+  $('status').textContent = 'Click on the map to add points. Double-click or Enter finishes the line, Esc cancels, Backspace removes the last point.';
+};
+for (const id of ['spType', 'spWidth', 'spAmount']) $(id).addEventListener('input', () => {       // the controls edit the line in hand, or set up the next one
+  const q = SPL.drawing || splineList()[SPL.sel];
+  if (q) { q.t = $('spType').value; q.w = +$('spWidth').value; q.a = +$('spAmount').value; if (!SPL.drawing) saveSplines(); }
+  splineInfo(); scheduleOverlay();
+});
+$('spType').addEventListener('change', () => $('spType').dispatchEvent(new Event('input')));
+$('spUndo').onclick = () => {
+  const q = SPL.drawing || splineList()[SPL.sel]; if (!q) return; q.p.pop();
+  if (!SPL.drawing) { if (q.p.length < 2) { SPL.list.splice(SPL.sel, 1); SPL.sel = -1; } saveSplines(); } else { splineInfo(); scheduleOverlay(); }
+};
+$('spDelete').onclick = () => { if (SPL.drawing) return finishSpline(false); if (splineList()[SPL.sel]) { SPL.list.splice(SPL.sel, 1); SPL.sel = -1; saveSplines(); } };
+$('spClear').onclick = () => { SPL.drawing = null; splineList().length = 0; SPL.sel = -1; saveSplines(); };
+$('spApply').onclick = () => { finishSpline(); $('gen').click(); };
+splineInfo();
+
+// ---------- presets ----------
+// Starting points in the spirit of the template pickers in terrain tools: each one is just a set of the ordinary controls.
+const PRESETS = {
+  farmland: { shape: 'round', mtn: '.7', lakes: '3', riv: '.8', elevation: '.35', erosion: '.15', snowLine: '1', terrainScale: '.008', hydraulic: 'off', landforms: 'on', pois: 'full' },
+  alpine: { shape: 'inlets', mtn: '1.5', lakes: '5', riv: '1.2', elevation: '.85', erosion: '.35', snowLine: '.45', terrainScale: '.012', hydraulic: 'light', landforms: 'on', pois: 'few' },
+  wild: { shape: 'archipelago', mtn: '1.1', lakes: '4', riv: '1', elevation: '.55', erosion: '.25', snowLine: '.8', terrainScale: '.012', hydraulic: 'light', landforms: 'on', pois: 'none' },
+  countryside: { shape: 'rolling', mtn: '.8', lakes: '4', riv: '.8', elevation: '.4', erosion: '.15', snowLine: '1', terrainScale: '.009', hydraulic: 'off', landforms: 'on', pois: 'full' },
+  valleys: { shape: 'mountainous', mtn: '1.4', lakes: '6', riv: '1.3', elevation: '.8', erosion: '.3', snowLine: '.55', terrainScale: '.011', hydraulic: 'strong', landforms: 'on', pois: 'few' },
+  plateau: { shape: 'plateaus', mtn: '1', lakes: '0', riv: '.2', elevation: '.6', erosion: '.1', snowLine: '1', terrainScale: '.01', hydraulic: 'off', landforms: 'off', pois: 'few' },
+  cliffs: { shape: 'coastal', mtn: '1.1', lakes: '2', riv: '.7', elevation: '.6', erosion: '.2', snowLine: '.9', terrainScale: '.011', hydraulic: 'light', landforms: 'on', pois: 'full' }
+};
+if (typeof MutationObserver !== 'undefined' && $('status').nodeType === 1) new MutationObserver(() => { if (/^Done/.test($('status').textContent)) splineInfo(); }).observe($('status'), { childList: true, characterData: true, subtree: true });
+if ($('preset')) $('preset').onchange = () => { const p = PRESETS[$('preset').value]; if (!p) return; applySettings(p); $('gen').click(); };
+
+// ---------- progress bars ----------
+// Every long job reports through the status line ("3/11 Rivers & lakes…", "PCG masks: Grass…", "Tile 4 of 64"). The
+// bars read that line: Overall shows how far through the whole job it is, Step names the item in hand. A step with no
+// measurable inner progress shows a moving bar, so it is always clear the app is working and on what.
+function progressFromStatus(text) {
+  const box = $('prog'); if (!box) return;
+  const busy = /…\s*$|^\d+\s*\/\s*\d+\b|\b\d+ of \d+\b/.test(text) && !/^Done|error|cancel/i.test(text);
+  box.hidden = !busy; if (!busy) { progressFromStatus.items = null; return; }
+  const frac = text.match(/(\d+)\s*(?:\/|of)\s*(\d+)/), all = $('pgAll'), item = $('pgItem');
+  const label = text.replace(/^\d+\s*\/\s*\d+\s*/, '').replace(/…\s*$/, '');
+  if (frac) { all.max = 1; all.value = Math.min(1, (+frac[1] - .5) / +frac[2]); $('pgAllL').textContent = `Overall ${frac[1]} of ${frac[2]}`; }
+  else {
+    // jobs that announce items by name only (masks, layers): count the items seen so far against the usual total
+    const group = label.split(':')[0], seen = progressFromStatus.items && progressFromStatus.items.group === group ? progressFromStatus.items : (progressFromStatus.items = { group, n: 0, last: '' });
+    if (seen.last !== label) { seen.n++; seen.last = label; }
+    const total = { 'PCG masks': 30 }[group];
+    if (total) { all.max = 1; all.value = Math.min(1, seen.n / total); } else all.removeAttribute('value');
+    $('pgAllL').textContent = total ? `Overall ${seen.n} of about ${total}` : 'Overall';
+  }
+  item.removeAttribute('value'); $('pgItemL').textContent = label || 'Working';
+}
+if (typeof MutationObserver !== 'undefined' && $('status') && $('status').nodeType === 1)
+  new MutationObserver(() => progressFromStatus($('status').textContent || '')).observe($('status'), { childList: true, characterData: true, subtree: true });
 startApp();
