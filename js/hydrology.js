@@ -21,12 +21,13 @@ function priorityFlood(h, n) {
   return { fl, flow, order, oc };
 }
 // carve river polylines (grid coords × sc → target grid) into heightmap h (n×n, cell metres)
-function carveRivers(h, n, cell, rivers, sc, widthOf, depthOf, floor = null, mark = null, { ox = 0, oy = 0, quads = n - 1, openEdge = false } = {}) {
+function carveRivers(h, n, cell, rivers, sc, widthOf, depthOf, floor = null, mark = null, { ox = 0, oy = 0, quads = n - 1, openEdge = false, uncut = null } = {}) {
   const original = h.slice(), margin = openEdge ? 0 : 1;
   for (const p of rivers) for (let j = 0; j < p.length - 1; j++) {
     const x0 = p[j][0] * sc, y0 = p[j][1] * sc, ra = p[j][2], b0 = p[j][3], x1 = p[j + 1][0] * sc, y1 = p[j + 1][1] * sc, b1 = p[j + 1][3];
     // bed half-width, then a bank that eases up to the ground: at least 2.5 cells (so the grid can represent it), never
     // steeper than about 1 in 5, and wider beside wide rivers
+    const keep = uncut ? uncut(ra) : false;                              // marked-only reach: note where it runs, cut nothing
     const wm = widthOf(ra), hw = Math.max(.9, wm / 2 / cell), dep = depthOf(ra), bank = Math.max(2.5, dep * 5 / cell, wm * .75 / cell), r = hw + bank, dx = x1 - x0, dy = y1 - y0;
     for (let y = Math.max(margin, oy, Math.floor(Math.min(y0, y1) - r)); y <= Math.min(quads - margin, oy + n - 1, Math.ceil(Math.max(y0, y1) + r)); y++)
       for (let x = Math.max(margin, ox, Math.floor(Math.min(x0, x1) - r)); x <= Math.min(quads - margin, ox + n - 1, Math.ceil(Math.max(x0, x1) + r)); x++) {
@@ -35,7 +36,7 @@ function carveRivers(h, n, cell, rivers, sc, widthOf, depthOf, floor = null, mar
         const i = (y - oy) * n + x - ox, bed = lerp(b0, b1, t);
         const fade = d <= hw ? 1 : 1 - sstep(0, 1, (d - hw) / bank);
         let tgt = Math.max(-3, lerp(original[i], bed, fade)); if (floor) tgt = Math.max(tgt, floor(i));
-        if (tgt < h[i]) h[i] = tgt;
+        if (!keep && tgt < h[i]) h[i] = tgt;
         if (mark && d <= Math.max(.5, wm / 2 / cell) + 1) mark[i] = 1;
       }
   }

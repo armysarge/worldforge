@@ -33,14 +33,21 @@ const pointOn = ([x, y], pts) => pts.some(([ax, ay], i) => {
   const city = [...settlements.values()].find(p => p.type === 'city');
   assert(city && world.streets.filter(s => s.town === city.id).length >= 12, 'the default city can grow multiple blocks');
   const network = world.roads.map(r => r.pts.map(([x, y]) => [x * world.cell, y * world.cell]));
-  for (const street of world.streets) {
-    const town = settlements.get(street.town);
-    assert(town, 'street references an exported settlement ID');
-    const start = street.pts[0];
-    const standaloneSpine = street.main && Math.hypot(start[0] - town.x * world.cell, start[1] - town.y * world.cell) < .01;
-    assert(standaloneSpine || network.some(road => pointOn(start, road)), 'local street starts on an existing road');
-    network.push(street.pts);
+  // Towns are street grids: a street may meet the network anywhere along its length, not only at its first point. Every
+  // street must end up joined to a road, directly or through other streets (a street through the town centre may stand alone
+  // as the spine of a settlement no road reaches).
+  for (const street of world.streets) assert(settlements.get(street.town), 'street references an exported settlement ID');
+  // street points are 5 m apart, so a street that crosses a line has a point within 4 m of it
+  const meets = ([x, y], pts) => pts.some(([ax, ay], i) => { if (!i) return Math.hypot(ax - x, ay - y) < 4; const [bx, by] = pts[i - 1], dx = bx - ax, dy = by - ay, t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1))); return Math.hypot(x - ax - dx * t, y - ay - dy * t) < 4; });
+  const pending = world.streets.slice();
+  for (let grew = true; grew && pending.length;) {
+    grew = false;
+    for (let j = pending.length - 1; j >= 0; j--) {
+      const street = pending[j], town = settlements.get(street.town), centre = [town.x * world.cell, town.y * world.cell];
+      if (street.pts.some(pt => network.some(road => meets(pt, road))) || (street.main && meets(centre, street.pts))) { network.push(street.pts); pending.splice(j, 1); grew = true; }
+    }
   }
+  assert(pending.length <= world.streets.length * .03, `local streets join the road network (${pending.length} of ${world.streets.length} do not)`);
   const footprints = world.buildings.filter(b => ['house', 'apartment', 'commercial', 'shop', 'civic'].includes(b.kind));
   assert(footprints.length > 100, 'street layout has room for buildings');
   for (const b of footprints) {

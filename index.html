@@ -59,10 +59,30 @@
   <button id="cancelGen" hidden title="Stop the generation in progress. The previous world stays on screen.">Cancel</button>
   </div></details>
 
-  <details class="panel" id="drawPanel"><summary>Draw ridges, rivers and roads</summary><div class="panel-body">
+  <details class="panel"><summary>Terrain shaping</summary><div class="panel-body">
+  <p class="hint">What each feature does to the ground. Marked only keeps the terrain untouched and still gives you the feature on the map and as splines, markers and masks, for engines that cut their own. Regenerate to apply.</p>
+  <label title="Carve cuts the river channel into the terrain. Marked only leaves the ground as it is; the river is still on the map, in the masks and exported as a spline lying on the ground."><span>Rivers</span><select id="shRivers"><option value="carve">Carve the channel</option><option value="mark">Marked only</option></select></label>
+  <label title="The same choice for the small streams above the rivers."><span>Streams</span><select id="shStreams"><option value="carve">Carve the channel</option><option value="mark">Marked only</option></select></label>
+  <label title="Carve exports the lake bed as a hollow. Marked only exports level ground at the water line; the lake stays on the map, in the water mask and as a shore outline."><span>Lakes</span><select id="shLakes"><option value="carve">Carve the basin</option><option value="mark">Marked only</option></select></label>
+  <label title="Land fits the road: the ground is cut and filled so the road keeps an even grade. Road fits the land: the road is laid on the ground as it is, only levelled across its width. Marked only: no change to the ground."><span>Roads</span><select id="shRoads"><option value="grade">Land fits the road (cut and fill)</option><option value="follow">Road fits the land (follows the ground)</option><option value="mark">Marked only</option></select></label>
+  <label title="Level pad flattens the ground under each building. Marked only leaves the ground as it is; footprints are still in the data."><span>Buildings</span><select id="shBuildings"><option value="pad">Level pad under each</option><option value="mark">Marked only</option></select></label>
+  </div></details>
+
+  <details class="panel"><summary>Material layers</summary><div class="panel-body">
+  <p class="hint">How the eight ground layers (sand, grass, farmland, forest, rock, snow, wetland, urban) are laid out. This changes the Material weights view and the layer weightmap exports straight away; no regenerate needed.</p>
+  <label title="Follow the biomes derives every layer from the biome map. Height and slope rules is the stack used in terrain editors and auto-materials: sand up to a height, rock from a slope, snow from a height."><span>Layer rules</span><select id="lyMode"><option value="biome">Follow the biomes</option><option value="rules">Height and slope rules</option></select></label>
+  <label title="Sand covers the ground from sea level up to this height in metres. Empty = 6 m."><span>Sand up to (m)</span><input type="number" id="lySand" min="0" step="1" placeholder="6"></label>
+  <label title="Bare rock takes over where the ground is steeper than this angle. Empty = 32 degrees."><span>Rock from slope (°)</span><input type="number" id="lyRockSlope" min="0" max="89" step="1" placeholder="32"></label>
+  <label title="Bare rock also takes over above this height in metres, whatever the slope. Empty = no height rule."><span>Rock from height (m)</span><input type="number" id="lyRockHeight" min="0" step="10" placeholder="off"></label>
+  <label title="Snow starts at this height in metres. Empty = the world's snow line (the Snow line slider)."><span>Snow from (m)</span><input type="number" id="lySnow" min="0" step="10" placeholder="auto"></label>
+  <label title="Width of the soft transition between layers, in metres of height (slope transitions use a third of it, in degrees). Empty = 15."><span>Blend (m)</span><input type="number" id="lyBlend" min="1" step="1" placeholder="15"></label>
+  <button id="lyPreview" title="Switch the map to the Material weights view to see the layers.">Show material layers on the map</button>
+  </div></details>
+
+  <details class="panel" id="drawPanel"><summary>Draw ridges, rivers, roads and biomes</summary><div class="panel-body">
   <p class="hint" id="spHelp">Sketch lines on the 2D map, then regenerate: the world is rebuilt around them.</p>
-  <label title="What the next line you draw will be. Ridges raise a crest, valleys lower a trough, rivers cut a course that water follows, roads are routed along the line."><span>Line type</span><select id="spType"><option value="ridge">Ridge (raise)</option><option value="valley">Valley (lower)</option><option value="river">River course</option><option value="road">Road</option></select></label>
-  <label title="How wide the ridge, valley or river valley is. Roads ignore this."><span>Width</span><input id="spWidth" type="range" min="100" max="3000" step="50" value="500"></label>
+  <label title="What the next line you draw will be. Ridges raise a crest, valleys lower a trough, rivers cut a course that water follows, roads are routed along the line. Paint strokes set the biome under the brush."><span>Line type</span><select id="spType"><option value="ridge">Ridge (raise)</option><option value="valley">Valley (lower)</option><option value="river">River course</option><option value="road">Road</option><optgroup label="Paint a biome"><option value="biome:3">Paint forest</option><option value="biome:2">Paint plains</option><option value="biome:9">Paint farmland</option><option value="biome:7">Paint wetland</option><option value="biome:4">Paint highland</option><option value="biome:5">Paint alpine rock</option><option value="biome:6">Paint snow</option><option value="biome:1">Paint beach</option></optgroup></select></label>
+  <label title="How wide the ridge, valley, river valley or paint brush is. Roads ignore this."><span>Width</span><input id="spWidth" type="range" min="100" max="3000" step="50" value="500"></label>
   <label title="Ridge height or valley depth; river size (stream, river, major river); road class (dirt track, gravel road, highway)."><span>Strength</span><input id="spAmount" type="range" min="1" max="10" step="1" value="5"></label>
   <div id="spInfo" class="hint" aria-live="polite"></div>
   <div class="row"><button id="spDraw" title="Start a new line: click on the map to add points, double-click or press Enter to finish, Esc to cancel, Backspace to remove the last point.">Draw new line</button><button id="spUndo" title="Remove the last point of the line being drawn, or the last point of the selected line.">Undo point</button></div>
@@ -76,6 +96,7 @@
   <div class="row"><button id="saveWorld" title="Keep the current seed and settings in this browser.">Save current</button><button id="shareLink" title="Copy a link that recreates this world from its seed and settings.">Copy share link</button></div>
   <label title="Worlds saved in this browser."><span>Saved</span><select id="savedList"></select></label>
   <div class="row"><button id="loadSaved" title="Apply the saved settings and generate that world.">Load and generate</button><button id="deleteSaved" title="Remove the selected world from this browser.">Remove</button></div>
+  <div class="row"><button id="saveProject" title="Download the current world's settings, drawn lines and painted biomes as a project file.">Save project file</button><button id="openProject" title="Open a .worldforge.json project file and generate its world.">Open project file</button></div>
   </div></details>
 
   <details class="panel" open><summary>Map layers</summary><div class="panel-body">
@@ -99,10 +120,11 @@
   </div></details>
 
   <details class="panel" open><summary>Export</summary><div class="panel-body">
-  <label title="Pixels per side for single heightmaps and masks. Terrain tiles use their own grid."><span>Export size</span><select id="xres"><option value="0">Same as grid</option><option value="2017">2017</option><option value="4033" selected>4033</option><option value="8129">8129 (very high memory use)</option></select></label>
+  <label title="Pixels per side for single heightmaps and masks. Terrain tiles use their own grid."><span>Export size</span><select id="xres"><option value="0">Same as grid</option><option value="2017">2017</option><option value="4033" selected>4033</option><option value="8129">8129 (highest quality)</option></select></label>
   <button class="secondary full" id="xAll" title="Download the heightmap, layers, masks, world data and import script for Unreal.">Export Unreal package</button>
   <div class="row"><button id="xPy" title="Download the Unreal Editor Python script for placing markers, volumes and splines.">Unreal import .py</button><button id="xMasks" title="Download density and exclusion maps for procedural placement.">PCG masks</button><button id="xCsv" title="Download places, roads, buildings and resources as tables.">Data tables .csv</button></div>
-  <div class="row"><button id="xR16" title="Download the 16-bit heightmap for Unreal Landscape.">Heightmap .r16</button><button id="xPng" title="Download an 8-bit grayscale height preview.">Preview .png (8-bit)</button></div>
+  <div class="row"><button id="xR16" title="Download the 16-bit heightmap for Unreal Landscape.">Heightmap .r16</button><button id="xPng16" title="Download the heightmap as a 16-bit grayscale PNG, full precision, for any terrain tool.">Heightmap .png (16-bit)</button></div>
+  <div class="row"><button id="xGaea" title="Download a 16-bit PNG at the nearest power-of-two size (up to 8192) with a settings file for Gaea: terrain width, height range and sea level.">Gaea heightmap</button><button id="xPng" title="Download an 8-bit grayscale height preview.">Preview .png (8-bit)</button></div>
   <div class="row"><button id="xUnity" title="Download Unity-compatible RAW height data and scale metadata.">Unity heightmap</button><button id="xGodot" title="Download RAW height data and scale metadata for Godot terrain tools.">Godot height data</button></div>
   <button class="secondary full" id="xUnityPack" title="Download terrain data, material masks and a Unity Editor importer in a ZIP.">Export Unity bundle</button>
   <div class="row"><button id="xLayers" title="Download one grayscale weightmap per terrain material.">Layer weightmaps</button><button id="xWater" title="Download the mask for mapped ocean and lakes.">Water mask</button></div>
@@ -143,6 +165,7 @@
     </div>
   </div>
   <input type="hidden" id="splines" value="">
+  <input type="file" id="projectFile" accept=".json,application/json" hidden>
   <canvas id="cv"></canvas>
   <canvas id="ov"></canvas>
   <div id="box3d" hidden></div>

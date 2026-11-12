@@ -43,8 +43,16 @@ function gradeSites(height, N, world, ox = 0, oy = 0, quads = N - 1) {
       });
     }
   };
-  for (const r of world.roads) if (r.type !== 'trail') gradeLine(r.pts, r.profile, r.type === 'highway' ? 12 : 7, world.cell, r.deck);
-  for (const s of world.streets) gradeLine(s.pts, s.grade, s.w, 1);
+  const shaping = world.shaping || {};
+  // lakes marked only: the lake bed is not exported as a hollow, the ground is level at the water line
+  if (shaping.lakes === 'mark' && world.lakes && world.lakes.length) {
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { const id = world.lakeId[Math.round((oy + y) * g) * world.n + Math.round((ox + x) * g)]; if (id) { const j = y * N + x, level = world.lakes[id - 1].level; if (height[j] < level) height[j] = level; } }
+  }
+  if (shaping.roads !== 'mark') {
+    for (const r of world.roads) if (r.type !== 'trail') gradeLine(r.pts, r.profile, r.type === 'highway' ? 12 : 7, world.cell, r.deck);
+    for (const s of world.streets) gradeLine(s.pts, s.grade, s.w, 1);
+  }
+  if (shaping.buildings === 'mark') return height;                         // buildings marked only: no pads
   // Building pads. Neighbouring pads on a slope sit at different levels, so they are blended rather than stamped one
   // over the other: every sample takes the weighted mean of the pads that reach it (a pad's own footprint outweighs a
   // neighbour's apron about fifty to one, so pads stay level) and moves towards that mean by the strongest pull on it.

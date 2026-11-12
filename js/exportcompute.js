@@ -54,7 +54,7 @@ fn rowAt(n: i32, y: i32, i: i32, t: f32) -> f32 {
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let n = i32(cfg[0]);
   let N = u32(cfg[1]);
-  if (id.x >= N || id.y >= N) { return; }
+  if (id.x >= N || id.y >= u32(cfg[17])) { return; }       // cfg[17] = rows in this band
   let f = cfg[4];
   let cellH = cfg[5];
   let gx = (cfg[2] + f32(id.x)) * f;
@@ -102,9 +102,21 @@ async function upsampleDetailGPU(world, N, ox, oy, quads, source, calm) {
     const noise = mkNoise(mulberry(hashSeed(world.seed) ^ 0x9e3779b9)), { p, gx, gy } = noise.tables, tables = new Float32Array(1024);
     tables.set(p); tables.set(gx, 512); tables.set(gy, 768);
     world.coverGPU ??= Uint32Array.from({ length: cells }, (_, i) => (world.land[i] ? 1 : 0) | (world.biome[i] << 1));
-    const config = new Float32Array([n, N, ox, oy, (n - 1) / quads, world.sizeM / quads, quads > N - 1 ? 1 : 0, ...DETAIL_GAIN]);
-    return await runTerrainKernel(device, pipeline, [config, tables, source, calm, world.slope, world.coverGPU], N * N * 4, N,
-      result => new Float32Array(result.slice(0)));
+    // The result buffer for a whole 8129 x 8129 export (264 MB) is larger than a GPU buffer binding may be, so the image is
+    // computed in horizontal bands that each fit, top to bottom, and joined here.
+    const limit = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize, 1 << 27);
+    const bandRows = Math.max(8, Math.min(N, globalThis.WF_GPU_BAND_ROWS || Math.floor(limit / (N * 4))));
+    const out = bandRows >= N ? null : new Float32Array(N * N);
+    for (let y0 = 0; y0 < N; y0 += bandRows) {
+      const rows = Math.min(bandRows, N - y0);
+      const config = new Float32Array([n, N, ox, oy + y0, (n - 1) / quads, world.sizeM / quads, quads > N - 1 ? 1 : 0, ...DETAIL_GAIN, rows]);
+      const part = await runTerrainKernel(device, pipeline, [config, tables, source, calm, world.slope, world.coverGPU], rows * N * 4, N,
+        result => new Float32Array(result.slice(0)));
+      if (!part) return null;
+      if (!out) return part;
+      out.set(part, y0 * N);
+    }
+    return out;
   } catch (error) {
     console.warn('WebGPU export detail failed. Using CPU.', error);
     return null;

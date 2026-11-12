@@ -25,7 +25,7 @@ The four views show the same generated 20 km world from the **Desolation Day** s
 
 ## Quick start
 
-1. Open [index.html](index.html) in a modern desktop browser. The 2D generator runs locally with no build step. The 3D view loads three.js from a CDN the first time it is opened.
+1. Open [index.html](index.html) in a modern desktop browser. It opens on a finished world: the one in the address (a share link, or the last world of that tab), otherwise your most recently saved world, otherwise the built-in example project (a 16 km crescent island on the quick 505 grid, on a new random seed each time; the seed is shown in the Seed box and the status line). The 2D generator runs locally with no build step. The 3D view loads three.js from a CDN the first time it is opened.
 2. Pick a **Preset** for a one-click starting point (farmland island, alpine island, wild archipelago, rolling countryside, mountain valleys, dry plateaus or cliff coast), or set things yourself: pick a scenario, seed, footprint, terrain type and generation grid. Use **505** for fast iteration, **1009** for a balanced grid, **2017** for finer generation, or **4033** for the most detailed simulation.
 3. Click **Generate terrain**. Two bars under the toolbar show progress: **Overall** for the whole job and **Step** for the stage or file in hand. They also run during exports. The collapsible legend on the map follows the selected layer. Hover over controls for a description. When a metro network exists, **Underground metro** shows its cyan dashed alignments in 2D and 3D.
 4. Pick an **Export size**, then use the export button for your engine. The generation grid drives the world simulation. A larger export adds terrain detail and resamples the existing world.
@@ -63,9 +63,43 @@ Choose a preset under **Terrain type → Mainland**. The terrain extends to the 
 
 **Erosion simulation** (Light or Strong) lets rivers cut into the base terrain and over-steep valley walls slump before lakes and rivers are laid out, giving branching valley networks and sharper ridges. It drains some natural hollows, so maps have fewer natural lakes. Off, the default, keeps existing maps unchanged. Grids above 505 are eroded at 505 and the change is interpolated back. **Elevation** scales vertical relief. **Erosion** controls how deeply catchment lines erode before river beds are carved. **Snow line** changes where snow appears in the biome and material layers. **Terrain scale** controls the size of terrain features. Higher values produce more closely spaced detail. The same seed and terrain controls work with **Satellite terrain**, **Topographic terrain**, and **Grayscale height** previews. Use the R16 or RAW export for full-precision engine height data. [Texturize Terrain Generator](https://texturize.app/generators/terrain)
 
-## Drawing ridges, rivers and roads
+## Town layouts
 
-Open **Draw ridges, rivers and roads**, pick a **Line type**, press **Draw new line** and click points on the 2D map. Double-click or press Enter to finish, Esc to cancel, Backspace to remove the last point. Press **Apply and regenerate** and the world is rebuilt around the lines: drainage, biomes, towns and the generated road network all respond to them.
+Settlements are laid out as surveyed towns.
+
+- **Blocks on a grid** squared to the main road through the centre. The main street and one cross street always run. The grid is complete in the core and thins towards the edge into longer blocks and dead ends, with an uneven outline. Cities use 90 m blocks, towns 70 m.
+- **Cities grow in districts**: a core on the main road and two or three districts on their own headings, each taking the ground nearest its own centre.
+- **Terrain decides**: the grid gives way to rivers, steep ground and the roads already there.
+- **Street bridges**: the main street, the cross street and every third street may bridge a river once, where the crossing is under about 45 m. The bridge deck runs level from bank to bank, and those streets are marked `bridge` in the world JSON.
+- **A square**: towns and cities keep a block beside the centre open as a green (`square` on the settlement in the world JSON).
+- **Works and yards**: the outermost street of each district carries large industrial buildings (`use: industrial` on the street).
+- **Villages** are one street along the road with a few short side lanes.
+
+Every street is joined to the road network. A highway that ends in a town is the end of that highway: towns in the middle of the highway network have it running through.
+
+## Terrain shaping: carve or mark
+
+The **Terrain shaping** panel sets what each kind of feature does to the ground. Regenerate after changing it.
+
+| Feature | Options |
+| --- | --- |
+| Rivers, Streams | **Carve the channel**, or **Marked only**: the ground is left as it is and the river is still on the map, in the masks and exported as a spline lying on the ground. Use this when the engine cuts its own rivers (for example the Unreal Water plugin). |
+| Lakes | **Carve the basin**, or **Marked only**: the export has level ground at the water line; the lake stays on the map, in the water mask and as a shore outline. |
+| Roads | **Land fits the road**: the ground is cut and filled so the road keeps an even grade (8% highways, 12% roads). **Road fits the land**: the road is laid on the ground as it is and only levelled across its width, so it rises and falls with the terrain. **Marked only**: no change to the ground. |
+| Buildings | **Level pad under each**, or **Marked only**: footprints stay in the data, the ground is untouched. |
+
+Roads still bridge rivers in every mode. With rivers marked only there is no channel to span, so those crossings are simply points on the road.
+
+## Material layers
+
+The **Material layers** panel sets how the eight ground layers (sand, grass, farmland, forest, rock, snow, wetland, urban) are laid out. It takes effect straight away in the **Material weights** map view and in the layer weightmap exports.
+
+- **Follow the biomes** (default) derives every layer from the biome map.
+- **Height and slope rules** is the stack used by terrain editors and auto-materials: **sand** from sea level up to a height, bare **rock** where the slope passes an angle (and optionally above a height), **snow** from a height, each with a soft **blend** band. Snow lies over rock, rock over the vegetation layers, and grass, farmland, forest and wetland share what is left according to the biomes. Empty fields are automatic: sand to 6 m, rock from 32°, no rock height, snow at the world's snow line, 15 m blend.
+
+## Drawing ridges, rivers, roads and biomes
+
+Open **Draw ridges, rivers, roads and biomes**, pick a **Line type**, press **Draw new line** and click points on the 2D map. Double-click or press Enter to finish, Esc to cancel, Backspace to remove the last point. Press **Apply and regenerate** and the world is rebuilt around the lines: drainage, biomes, towns and the generated road network all respond to them.
 
 | Line type | Effect | Width | Strength |
 | --- | --- | --- | --- |
@@ -74,7 +108,11 @@ Open **Draw ridges, rivers and roads**, pick a **Line type**, press **Draw new l
 | River course | Cuts a steadily falling valley from the higher end of the line to the lower and feeds it water, so a river runs the whole length. From the end of the line the water finds its own way downhill. | Width of the valley | 1 to 3 stream, 4 to 7 river, 8 to 10 major river |
 | Road | Routed through the drawn points with the normal road rules (grades, bridges, tunnels) and built before the generated network, which then joins it. | Not used | 1 to 3 dirt track, 4 to 7 gravel road, 8 to 10 highway |
 
+**Paint** types (forest, plains, farmland, wetland, highland, alpine rock, snow, beach) work the same way as brush strokes: every land cell under the stroke takes that biome, with **Width** as the brush width. Later strokes cover earlier ones, lakes and sea are left alone, and painted ground is not converted to farmland. Site placement, resources, material weights and PCG masks all follow the painted biomes.
+
 To change a line, click it and drag its points; the Width and Strength sliders then edit the selected line. **Undo point**, **Delete selected** and **Clear all** do what they say. Lines are stored as part of the world's settings, as fractions of the map, so saved worlds and share links keep them and they survive a change of footprint or grid.
+
+Roads keep off beaches: sand costs extra to build on, and the shore road between neighbouring ports and lighthouses runs set back from the water in stretches, not as a ring round every island.
 
 A road follows the sketch where the ground allows. Across ground too steep for its class it goes round, and the panel says how far. Changing the terrain with a ridge or river also changes where towns and other sites are placed, because placement scores the new ground.
 
@@ -180,12 +218,16 @@ For a custom Godot terrain, decode the unsigned little-endian 16-bit samples wit
 
 | Button | Output |
 | --- | --- |
+| **Heightmap .png (16-bit)** | The same samples as the R16 as a 16-bit grayscale PNG, which terrain tools open directly. |
+| **Gaea heightmap** | A 16-bit PNG at the nearest power-of-two size (512 to 8192) and a settings JSON with the terrain width, height range in metres and sea level as a fraction of that range, plus the steps for loading it through a File node. Build at the same size and keep the same width and height in Gaea, and the result drops back onto every Worldforge coordinate, mask and spline. |
 | **Vectors .geojson** | Roads (with elevation profile), bridges, viaducts, tunnels and overpasses as separate lines, rivers (bed elevation and width per vertex), streets, lakes and POIs. Coordinates are metres from the north-west corner, not geographic. |
 | **Mesh .glb / .obj** | The terrain as a triangle mesh with normals, at the selected **Mesh size**. x east, y up, z south, in metres. |
 | **Normal map .png** | World-space normal map at the export size. Green points north (OpenGL convention); flip green for Unreal. |
 | **PCG masks** | Now also includes **Scree**, loose rock on the slopes below cliffs, and four data maps: **Data_Slope** (white is 60° or steeper), **Data_Flow** (how much water drains through, log scale), **Data_Curvature** (grey is flat, lighter is ridges, darker is hollows) and **Data_Aspect** (north-facing black, south-facing white). |
 
 ## Saved worlds and links
+
+**Save project file** downloads the current world's settings, drawn lines and painted biomes as a small `.worldforge.json` file; **Open project file** loads one and generates it. Use these to back a world up or pass it to someone else.
 
 **Saved worlds** keeps seeds and their settings in this browser. **Copy share link** copies a URL that recreates the current world; the address bar also updates after each generation. Links reproduce maps exactly with **CPU** compute; WebGPU can differ slightly.
 
@@ -213,7 +255,7 @@ Export partial tiles from the same generated world, with the same edits, target 
 - Weightmaps blend biome coverage with slope, moisture, river and built-up ground. **Material weights** previews the combined surface. The Unity bundle resamples all eight weightmaps to the same size as its heightmap.
 - Road structures in the world JSON include bridge deck points in metres. Local streets include elevation profiles, buildings have a foundation elevation, and metro links contain underground XYZ points. The Unreal script can import metro alignment splines using the road spline Blueprint. Use the structure data to build your bridge meshes and tunnel interiors.
 - Exported heightmaps grade dry ground under building pads and roadbeds. Fine features depend on the export's vertex spacing, and grading preserves mapped river channels, water and lake rims.
-- Exporting 8129 × 8129 can use significant browser memory. Iterate at a smaller size before exporting a large world.
+- **8129 × 8129** is supported for the heightmap (R16, 16-bit PNG, Gaea at 8192), layer weightmaps, the water mask and all PCG masks. PNGs are written row by row through the browser's own compressor, masks are computed on the generation grid and interpolated as they are written, and vector layers are drawn in strips, so no full-size RGBA image is ever held. A complete 8129 set took about two minutes and stayed under 1 GB of script memory in testing; the R16 is 132 MB. The WebGPU relief pass runs in bands at this size. The normal map and the Unity bundle are still limited by their own formats (Unity tops out at 4097).
 
 ## Editing and checking POIs
 

@@ -14,7 +14,7 @@ const SLICE_M = 2000, DEV_M = 1225;         // docs: vertical slice ~4 km², fir
 
 // Settings that drive generation. Read from the form on the main thread; buildWorld itself never touches the DOM,
 // so it can run in a Web Worker (js/worker.js).
-const GEN_SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms', 'hydraulic', 'pois', 'splines'];
+const GEN_SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms', 'hydraulic', 'pois', 'splines', 'shRivers', 'shStreams', 'shLakes', 'shRoads', 'shBuildings'];
 const readGenSettings = () => Object.fromEntries(GEN_SETTING_IDS.map(id => [id, $(id).value]));
 // river width/depth from catchment: plain functions can't cross the worker boundary, so they are rebuilt from riverT and ez
 function attachRiverFns(world) {
@@ -48,6 +48,11 @@ async function buildWorld(settings, onStatus = () => {}) {
   const frequency = terrainSettings.scale * 100, elevation = .4 + 1.2 * terrainSettings.elevation;
   const snowM = (300 + 2000 * terrainSettings.snowLine) * ez;
   const useGPU = val('compute') === 'auto', landforms = val('landforms') !== 'off';   // landforms: deltas + floodplains (reshape terrain)
+  // Terrain shaping: what each kind of feature does to the ground. 'mark' leaves the terrain alone and only records where the
+  // feature is (map, splines, masks), for engines that cut their own rivers, roads and pads. Roads have a middle setting:
+  // 'grade' cuts and fills the land to an even road, 'follow' lays the road on the ground as it is.
+  const shaping = { rivers: val('shRivers') === 'mark' ? 'mark' : 'carve', streams: val('shStreams') === 'mark' ? 'mark' : 'carve', lakes: val('shLakes') === 'mark' ? 'mark' : 'carve',
+    roads: ['follow', 'mark'].includes(val('shRoads')) ? val('shRoads') : 'grade', buildings: val('shBuildings') === 'mark' ? 'mark' : 'pad' };
   const stageTimes = []; let stageName = null, stageStart = performance.now();            // seconds spent in each generation stage
   const lapStage = () => { const now = performance.now(); if (stageName) stageTimes.push([stageName, (now - stageStart) / 1000]); stageStart = now; };
   const status = m => { lapStage(); stageName = m.replace(/…$/, ''); return Promise.resolve(onStatus(m)).then(() => new Promise(r => setTimeout(r))); };   // onStatus may throw GenerationCancelled
@@ -352,7 +357,9 @@ async function buildWorld(settings, onStatus = () => {}) {
   // carveD = how far each cell was lowered by the channel carve. Exports add it back before upsampling and re-cut the
   // channel at export resolution, so banks come out smooth instead of inheriting the grid's stair-steps.
   const carveD = h.slice();
-  carveRivers(h, n, cell, rivers, 1, widthOf, depthOf, i => rimL[i], chanM, { openEdge: !!mainland });
+  // channels that are only marked are still traced into chanM (roads must bridge them) but cut nothing
+  const uncut = a => (a >= 6 * T ? shaping.rivers : shaping.streams) === 'mark';
+  carveRivers(h, n, cell, rivers, 1, widthOf, depthOf, i => rimL[i], chanM, { openEdge: !!mainland, uncut });
   for (let i = 0; i < N2; i++) carveD[i] = Math.max(0, carveD[i] - h[i]);
   if (landforms) for (let i = 0; i < N2; i++) if (chanM[i] && floodM[i]) { floodM[i] = 0; floodCells--; }   // the floodplain is the land beside the channel
   reality.floodplainKm2 = floodCells * cellKm2;
@@ -385,6 +392,14 @@ async function buildWorld(settings, onStatus = () => {}) {
     // beaches only on gentle shores, never on cliffs
     biome[i] = h[i] < 8 && dO[i] < 2.5 * cell && sl < 12 ? 1 : h[i] > snowM ? 6 : h[i] > 1300 * ez || sl > 34 ? 5 : h[i] > 700 * ez || sl > 24 ? 4
       : h[i] < 60 * ez && sl < 2 && dW[i] < M(500) && m > .6 ? 7 : m > .5 ? 3 : 2;
+  }
+  // painted biomes (Draw panel): every land cell under a brush stroke takes the painted biome, later strokes over earlier
+  // ones. Painted cells are marked so the farmland pass leaves them alone. Placement, resources, materials and masks all
+  // read the biome map after this point, so they follow the paint.
+  const painted = new Uint8Array(N2);
+  for (const q of userSplines) {
+    if (q.t !== 'biome' || !(q.b >= 1 && q.b <= 9) || q.b === 8) continue;
+    nearLine(splineLine(q), Math.max(1, (q.w || 400) / 2 / cell), i => { if (land[i] && !lakeId[i]) { biome[i] = q.b; painted[i] = 1; } });
   }
   const flatArr = new Float32Array(N2), forArr = new Float32Array(N2), mtnArr = new Float32Array(N2), ocnArr = new Float32Array(N2);
   for (let i = 0; i < N2; i++) { flatArr[i] = land[i] && slope[i] < 4 ? 1 : 0; forArr[i] = biome[i] === 3 ? 1 : 0; mtnArr[i] = h[i] > 700 * ez ? 1 : 0; ocnArr[i] = ocean[i]; }
@@ -492,12 +507,13 @@ async function buildWorld(settings, onStatus = () => {}) {
     // radius is chosen later), plus a garden/verge margin
     const townM = new Uint8Array(N2); sitePrep.fill(0);
     for (const p of pois) { const c = SET[p.type]; if (!c) continue;
-      const r = (c[0] * 1.15 + Math.max(60, cell)) / cell, rc = Math.ceil(r);
-      for (let y = Math.max(0, p.y - rc); y <= Math.min(n - 1, p.y + rc); y++) for (let x = Math.max(0, p.x - rc); x <= Math.min(n - 1, p.x + rc); x++) if (Math.hypot(x - p.x, y - p.y) <= r) townM[y * n + x] = 1; }
+      const r = (c[0] * 1.15 + Math.max(60, cell)) / cell, rc = Math.ceil(r * 1.3);
+      // the cleared ground has a wandering edge (a plain circle shows on the map as a disc around every town)
+      for (let y = Math.max(0, p.y - rc); y <= Math.min(n - 1, p.y + rc); y++) for (let x = Math.max(0, p.x - rc); x <= Math.min(n - 1, p.x + rc); x++) if (Math.hypot(x - p.x, y - p.y) <= r * (1 + .3 * clamp(.5 + .5 * noise(x * .09 + 31, y * .09 + 57), 0, 1))) townM[y * n + x] = 1; }
     for (let i = 0; i < N2; i++) {
       const x = i % n, y = i / n | 0, b = biome[i];
       const FR = Math.max(M(2600), 1200);                                                          // fields reach ~1.2 km+ from farmsteads (real distance)
-      if (!land[i] || riv[i] || chanM[i] || slope[i] >= 9 || h[i] > 350 * ez || dF[i] > FR) continue;
+      if (!land[i] || painted[i] || riv[i] || chanM[i] || slope[i] >= 9 || h[i] > 350 * ez || dF[i] > FR) continue;
       const near = 1 - dF[i] / FR;                                                                 // the closer to a farm, the more of it is cleared
       if (b === 2 || (b === 3 && noise(x * .06 + 71, y * .06 + 71) + near * .6 > .15)) { if (townM[i]) { sitePrep[i] = 1; biome[i] = 2; continue; } biome[i] = 9; before += slope[i] < 2 ? 1 : 0; n9++; }
     }
@@ -671,6 +687,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   // the carved (meandered) channel strays several cells from the drainage cells in riv[], so it needs its own penalty:
   // otherwise a valley road finds the free, flat river corridor and runs along (or on top of) the river instead of bridging it
   const chanList = []; for (let i = 0; i < N2; i++) if (chanM[i]) { chanList.push(i); base[i] += 20; }
+  for (let i = 0; i < N2; i++) if (biome[i] === 1) base[i] += 8;          // beaches are not road corridors: flat sand used to be the cheapest ground on the map
   cost.set(base);
   const G = new Float32Array(N2), FROM = new Int32Array(N2), CL = new Uint8Array(N2); let routeFull = true;   // routeFull: the shared search arrays need a whole-grid reset
   function astar(a, b, cst, H) {
@@ -845,11 +862,12 @@ async function buildWorld(settings, onStatus = () => {}) {
 
   // coastal road (Island_and_Biomes.md: coast & ports): harbors, lighthouses and piers linked around the island, hugging the shore
   if (!mainland || shape === 'coastal') {
-    const cst2 = new Float32Array(N2); for (let i = 0; i < N2; i++) cst2[i] = cost[i] * (land[i] && dO[i] < Math.max(M(700), 3 * cell) ? .35 : 1);
+    // the shore road runs set back from the water (from about 150 m inland, never on the beach itself)
+    const back = Math.max(150, 2 * cell), cst2 = new Float32Array(N2); for (let i = 0; i < N2; i++) cst2[i] = cost[i] * (land[i] && biome[i] !== 1 && dO[i] >= back && dO[i] < back + Math.max(M(700), 3 * cell) ? .35 : 1);
     let mx = 0, my = 0, c0 = 0; for (let i = 0; i < N2; i += 7) if (land[i]) { mx += i % n; my += i / n | 0; c0++; } mx /= c0 || 1; my /= c0 || 1;
     const order = p => mainland ? p.x * ca + p.y * sa : Math.atan2(p.y - my, p.x - mx);
     const cs = pois.filter(p => ['harbor', 'lighthouse', 'dock'].includes(p.type)).sort((a, b) => order(a) - order(b));
-    if (cs.length > 1) for (let j = 0; j < cs.length - (mainland ? 1 : 0); j++) { const a = cs[j], b = cs[(j + 1) % cs.length]; if (dk(a, b) < M(30)) link(a, b, 'road', cst2, { coastal: true }); }
+    if (cs.length > 1) for (let j = 0; j < cs.length - (mainland ? 1 : 0); j++) { const a = cs[j], b = cs[(j + 1) % cs.length]; if (dk(a, b) < M(14) && R() < .5) link(a, b, 'road', cst2, { coastal: true }); }   // short hops between neighbouring ports and lights, about half of them: stretches of coast road, not a ring round every island
   }
 
   // alternate routes (Island_and_Biomes.md: viable alternate routes): the city and every town get at least two road links
@@ -955,9 +973,10 @@ async function buildWorld(settings, onStatus = () => {}) {
     for (const r of roads.slice().sort((a, b) => RANK[b.type] - RANK[a.type])) {      // highways first; later roads join their surface
       const p = r.path, L = p.length; if (L < 3) continue;
       const dist = new Float32Array(L); for (let j = 1; j < L; j++) { const d = Math.abs(p[j] - p[j - 1]); dist[j] = dist[j - 1] + (d === 1 || d === n ? 1 : 1.4142) * cell; }
-      const win = r.type === 'trail' ? 0 : Math.max(1, Math.round(30 / cell)), z0 = p.map(i => h[i]);   // footpaths hug the ground
+      const laid = shaping.roads !== 'grade', marked = shaping.roads === 'mark';      // laid on the ground as it is / not shaped at all
+      const win = r.type === 'trail' || marked ? 0 : Math.max(1, Math.round(30 / cell)), z0 = p.map(i => h[i]);   // footpaths hug the ground
       const z = z0.map((_, j) => { let s = 0, c = 0; for (let q = Math.max(0, j - win); q <= Math.min(L - 1, j + win); q++) { s += z0[q]; c++; } return s / c; });
-      const g = GRADE[r.type];
+      const g = laid ? 4 : GRADE[r.type];                                    // a road that follows the ground has no grade limit of its own
       for (let j = 1; j < L; j++) z[j] = clamp(z[j], z[j - 1] - g * (dist[j] - dist[j - 1]), z[j - 1] + g * (dist[j] - dist[j - 1]));
       for (let j = L - 2; j >= 0; j--) z[j] = clamp(z[j], z[j + 1] - g * (dist[j + 1] - dist[j]), z[j + 1] + g * (dist[j + 1] - dist[j]));
       // clearance: decks ≥ 3 m over a channel, ≥ 1 m beside one; ramps up to that at the same max grade (max of two
@@ -965,7 +984,7 @@ async function buildWorld(settings, onStatus = () => {}) {
       const cone = p.map(c => riv[c] || chanM[c] ? h[c] + 3 : nearChan[c] + 1);
       for (let j = 1; j < L; j++) cone[j] = Math.max(cone[j], cone[j - 1] - g * (dist[j] - dist[j - 1]));
       for (let j = L - 2; j >= 0; j--) cone[j] = Math.max(cone[j], cone[j + 1] - g * (dist[j + 1] - dist[j]));
-      for (let j = 0; j < L; j++) z[j] = Math.max(z[j], cone[j]);
+      if (!marked) for (let j = 0; j < L; j++) z[j] = Math.max(z[j], cone[j]);
       // junctions: where this road meets an already-built road it is pinned to that surface, ramping to it within its grade
       const U = new Float32Array(L).fill(Infinity), Lo = new Float32Array(L).fill(-Infinity);
       for (let j = 0; j < L; j++) if (bedM[p[j]]) U[j] = Lo[j] = h[p[j]];
@@ -1003,6 +1022,7 @@ async function buildWorld(settings, onStatus = () => {}) {
       const hw = Math.max(.75, RWID[r.type] / 2 / cell), touched = [], line = r.pts.length === L ? r.pts : null;
       for (let j = 0; j < L; j++) {
         const c = p[j]; if (deck[j]) continue;                               // bridge / viaduct / tunnel: terrain left as is
+        if (marked) { bedM[c] = 1; continue; }                               // marked only: the ground is not touched
         const cx = c % n, cy = c / n | 0, bank = Math.max(1.5, Math.abs(z[j] - orig[c]) / (.5 * cell)), R2 = Math.ceil(hw + bank) + 1;
         const px = line ? line[j][0] : cx, py = line ? line[j][1] : cy;
         for (let dy = -R2; dy <= R2; dy++) for (let dx = -R2; dx <= R2; dx++) {
@@ -1199,43 +1219,91 @@ async function buildWorld(settings, onStatus = () => {}) {
       streets.push(street); frontages.push(street);
       return street;
     };
-    if (!frontages.length) {
-      for (const turn of [0, .75, -.75, Math.PI]) {
-        const a = p.angle + turn, length = radius * .82;
-        if (lane(center, [center[0] + Math.cos(a) * length, center[1] + Math.sin(a) * length], village ? 6 : 8, true)) break;
+    // ---- street plan ---------------------------------------------------------------------------------------------
+    // Towns are laid out the way they are surveyed: a grid of blocks squared to the main road through the centre, a main
+    // street and a cross street that always run, a complete grid in the core that thins towards the edge into longer
+    // blocks and dead ends, and an uneven outline. The grid gives way to water, steep ground and the roads already
+    // there, so every town comes out different. Villages are one street along the road with a few short side lanes.
+    const longest = frontages.slice().sort((a, b) => b.pts.length - a.pts.length)[0];
+    if (longest && longest.pts.length > 3) { const a = longest.pts[0], b = longest.pts[Math.min(longest.pts.length - 1, Math.max(2, Math.round(longest.pts.length * .4)))]; p.angle = Math.atan2(b[1] - a[1], b[0] - a[0]); }
+    const bu = block * (village ? 1.9 : 1.6), bv = block * (village ? 1.3 : 1);
+    const reach = (x, y) => radius * (.72 + .3 * noise(x / 260 + 7, y / 260 + 19) + .1 * noise(x / 90 + 3, y / 90 + 5));   // the town's uneven edge
+    const dry = (x, y) => { if (x < 0 || y < 0 || x > sizeM || y > sizeM) return false; const i = indexAt(x, y); return land[i] && slope[i] < 15 && h[i] >= 2; };   // ground a street can stand on, water aside
+    const wet = (x, y) => { const i = indexAt(x, y); return riv[i] >= 2 || !!chanM[i]; };
+    const onRoad = (x, y) => hits(x, y, 6, o => Math.hypot(x - o.x, y - o.y) < o.r + 6);           // beside or on something already built
+    const touches = (x, y) => hits(x, y, 1, o => Math.hypot(x - o.x, y - o.y) < Math.max(2.5, o.r - 2));   // actually on its surface
+    let outer = null, bridges = 0;                                           // the street farthest from the centre (works and yards go there)
+    // One grid: origin and heading, limited to the ground `mine` says belongs to it. A city is several of these.
+    const layGrid = (origin, angle, mine, seedCentre) => {
+      const ax = Math.cos(angle), ay = Math.sin(angle), span = radius + distance(origin, center), nu = Math.ceil(span / bu), nv = Math.ceil(span / bv), W2 = 2 * nu + 2;
+      const salt = Math.round(origin[0] + origin[1] * 3) % 89;
+      const node = (iu, iv) => {                                             // grid corner, nudged by a smooth field so no street is ruler-straight
+        const wob = block * .16, u = iu * bu + wob * noise(iu * .37 + salt, iv * .37 + 11), v = iv * bv + wob * noise(iu * .37 + 53, iv * .37 + salt);
+        return [origin[0] + u * ax - v * ay, origin[1] + u * ay + v * ax];
+      };
+      const nodeId = (iu, iv) => (iv + nv) * W2 + iu + nu, kept = new Map(), seeds = new Set(seedCentre ? [nodeId(0, 0)] : []);
+      const tryEdge = (iu, iv, dir) => {                                     // one block side: dir 0 runs along the main street, 1 across it
+        const a = node(iu, iv), b = dir ? node(iu, iv + 1) : node(iu + 1, iv), count = Math.max(2, Math.ceil(distance(a, b) / 5)), pts = [];
+        const mainLine = !dir && iv === 0, crossLine = dir && iu === 0;
+        let shared = 0, span = 0, spans = 0, joined = false;
+        for (let j = 0; j <= count; j++) {
+          const x = lerp(a[0], b[0], j / count), y = lerp(a[1], b[1], j / count);
+          if (distance([x, y], center) > reach(x, y) || !mine(x, y) || !dry(x, y)) return;
+          const over = wet(x, y); if (over) { if (!j || j === count) return; if (!span) spans++; span++; } else span = 0;      // a bridge needs dry ground at both ends
+          if (span > 9) return;                                              // more than about 45 m of water: no street bridge here
+          if (onRoad(x, y)) { shared++; if (!joined && touches(x, y)) joined = true; } pts.push(over ? [x, y, true] : [x, y]);
+        }
+        // bridges are few: the main street, the cross street and every third street may cross a river, once
+        if (spans && (village || spans > 1 || !(mainLine || crossLine || (dir ? iu : iv) % 3 === 0))) return;
+        if (shared > count * .45) return;                                    // it would run along a road that is already there (crossing one is fine)
+        const edge = distance([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], center) / radius;
+        const drop = village ? (mainLine ? 0 : dir && (iv === 0 || iv === -1) ? .5 : 1) : mainLine || crossLine || spans ? 0 : sstep(.4, 1, edge) * (cityPlan ? .3 : .55);
+        if (R() < drop) return;
+        kept.set(nodeId(iu, iv) * 2 + dir, { iu, iv, dir, pts, spans });
+        if (joined) { seeds.add(nodeId(iu, iv)); seeds.add(dir ? nodeId(iu, iv + 1) : nodeId(iu + 1, iv)); }       // meets a road or an earlier street: part of the network
+      };
+      for (let iv = -nv; iv <= nv; iv++) for (let iu = -nu; iu <= nu; iu++) { tryEdge(iu, iv, 0); tryEdge(iu, iv, 1); }
+      // keep only the streets joined to the centre or to a road: no stray blocks cut off by a river or a hillside
+      const links = new Map(), join = (a, b) => { for (const [x, y] of [[a, b], [b, a]]) { let l = links.get(x); if (!l) links.set(x, l = []); l.push(y); } };
+      for (const e of kept.values()) join(nodeId(e.iu, e.iv), e.dir ? nodeId(e.iu, e.iv + 1) : nodeId(e.iu + 1, e.iv));
+      const live = new Set(), queue = [...seeds].filter(s => links.has(s)); for (const s of queue) live.add(s);
+      for (let q = 0; q < queue.length; q++) for (const t of links.get(queue[q]) || []) if (!live.has(t)) { live.add(t); queue.push(t); }
+      // consecutive block sides along one grid line become one street
+      const made = [];
+      const lay = (edgesInLine, width, main) => {
+        let run = null;
+        const flush = () => { if (run && run.length > 4) made.push({ pts: run, w: width, main, owner: p }); run = null; };
+        for (const e of edgesInLine) { if (!e || !live.has(nodeId(e.iu, e.iv))) { flush(); continue; } bridges += e.spans; run = run ? run.concat(e.pts.slice(1)) : e.pts.slice(); }
+        flush();
+      };
+      for (let iv = -nv; iv <= nv; iv++) { const line = []; for (let iu = -nu; iu <= nu; iu++) line.push(kept.get(nodeId(iu, iv) * 2)); lay(line, iv === 0 ? (cityPlan ? 9 : village ? 6 : 8) : cityPlan ? 7 : village ? 5 : 6, iv === 0 && seedCentre !== null); }
+      for (let iu = -nu; iu <= nu; iu++) { const line = []; for (let iv = -nv; iv <= nv; iv++) line.push(kept.get(nodeId(iu, iv) * 2 + 1)); lay(line, iu === 0 ? (cityPlan ? 8 : village ? 5 : 7) : cityPlan ? 7 : village ? 5 : 6, false); }
+      // all tested against what was there first, then reserved together, so the grid's own crossings stay open
+      for (const street of made) { reserveStreet(street.pts, street.w); streets.push(street); frontages.push(street);
+        const mid = street.pts[street.pts.length >> 1], far = distance(mid, center); if (!street.main && street.pts.length > 12 && (!outer || far > outer.far)) outer = { street, far }; }
+      return { node, made };
+    };
+    // Districts. A town or village is one grid. A city is an older core on the main road plus two or three districts on
+    // their own headings (each takes the ground nearer its own centre), which is how cities that grew in stages look.
+    const sites = [{ at: center, angle: p.angle }];
+    if (cityPlan) { const count = 2 + (R() < .5 ? 1 : 0), turn = R() * 6.2832;
+      for (let j = 0; j < count; j++) { const a = turn + j * 6.2832 / count + rnd([-.4, .4]), d = radius * rnd([.5, .62]); sites.push({ at: [center[0] + Math.cos(a) * d, center[1] + Math.sin(a) * d], angle: p.angle + (R() < .5 ? -1 : 1) * rnd([.3, .75]) }); } }
+    const nearestSite = (x, y) => { let best = 0, bd = Infinity; for (let j = 0; j < sites.length; j++) { const d = distance([x, y], sites[j].at) * (j ? 1 : .8); if (d < bd) { bd = d; best = j; } } return best; };   // the core holds a little more ground
+    const hadRoads = frontages.length > 0;
+    let core = null;
+    sites.forEach((site, j) => { const g = layGrid(site.at, site.angle, (x, y) => nearestSite(x, y) === j, j === 0 ? !hadRoads : false); if (!j) core = g; });
+    if (bridges) reality.streetBridges = (reality.streetBridges || 0) + bridges;
+    // the square: the block beside the centre is kept open as a green (towns and cities)
+    if (!village && core) {
+      // whichever of the four blocks round the centre is free, full size if it fits, smaller if a road cuts the block
+      place: for (const scale of [1, .62]) for (const [iu, iv] of [[0, 0], [-1, 0], [0, -1], [-1, -1]]) {
+        const a = core.node(iu, iv), b = core.node(iu + 1, iv + 1), mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], w = (bu - 22) * scale, d = (bv - 22) * scale;
+        if (addB(mid[0], mid[1], w, d, p.angle, 'park', 1, level)) { p.square = { x: Math.round(mid[0]), y: Math.round(mid[1]), widthM: Math.round(w), depthM: Math.round(d) }; break place; }
       }
     }
-    for (const spine of frontages.slice()) {
-      const branches = [[], []], pts = spine.pts;
-      let along = 0, next = block * .55;
-      for (let j = 1; j < pts.length - 1; j++) {
-        along += distance(pts[j - 1], pts[j]);
-        if (along < next) continue;
-        next = along + block * rnd([.85, village ? 1.8 : 1.45]);
-        const at = pts[j];
-        if (at[2]) continue;
-        if (anchors.some(anchor => distance(anchor, at) < block * .64)) continue;
-        anchors.push(at);
-        const a = Math.atan2(pts[j + 1][1] - pts[j - 1][1], pts[j + 1][0] - pts[j - 1][0]);
-        for (const side of [0, 1]) {
-          if (!cityPlan && R() < (village ? .49 : .24)) continue;
-          const direction = a + (side ? 1 : -1) * rnd([.91, 1.92]);
-          const length = Math.min(radius * .67, block * (cityPlan ? rnd([1.35, 3.25]) : rnd([.75, 2.2])));
-          const street = lane(at, [at[0] + length * Math.cos(direction), at[1] + length * Math.sin(direction)], cityPlan ? 8 : village ? 5 : 6);
-          if (street) branches[side].push(street);
-        }
-      }
-      // Connect neighbouring lanes where terrain permits. Gaps become yards, green space or cul-de-sacs.
-      if (!village) for (const group of branches) for (let j = 1; j < group.length; j++) {
-        const first = group[j - 1].pts, second = group[j].pts, a = first.at(-1), b = second.at(-1);
-        if (cityPlan && distance(first[0], a) > block * 1.55 && distance(second[0], b) > block * 1.55) {
-          // An inner cross street gives the deeper city districts a second row of blocks.
-          const innerA = first[Math.floor(first.length * .5)], innerB = second[Math.floor(second.length * .5)];
-          if (distance(innerA, innerB) <= block * 1.8) lane(innerA, innerB, 6, false, true);
-        }
-        if (distance(a, b) <= block * 2.3 && (cityPlan || R() < .72)) lane(a, b, cityPlan ? 7 : 6, false, true);
-      }
-    }
+    // works and yards: the outermost street carries large industrial buildings, not houses
+    if (!village && outer) outer.street.use = 'industrial';
+    p.layout = cityPlan ? `core and ${sites.length - 1} districts on their own grids` : village ? 'street village' : 'town grid';
   }
   const hospitals = [], metroStops = [], omitted = new Set();
   const hospitalSpacingM = Math.max(1500, M(12000));
@@ -1272,7 +1340,7 @@ async function buildWorld(settings, onStatus = () => {}) {
       if (!placed) omitted.add(q);
     }
     const pr = PROF[p.type];
-    for (const { pts, w, main } of frontages) for (const side of [-1, 1]) {
+    for (const { pts, w, main, use } of frontages) for (const side of [-1, 1]) {
       let carry = rnd([3, 16]);
       for (let j = 1; j < pts.length; j++) {
         const [x, y] = pts[j - 1], [xx, yy] = pts[j], L = Math.hypot(xx - x, yy - y);
@@ -1288,8 +1356,9 @@ async function buildWorld(settings, onStatus = () => {}) {
           } else if (p.type === 'city' && edge < .75 && district > .08) {
             kind = 'apartment'; f *= 1.5; d *= 1.2;
           }
+          if (use === 'industrial') { kind = 'industrial'; f = rnd([26, 48]); d = rnd([16, 28]); setback = rnd([6, 12]); gap = rnd([8, 20]); }
           const offset = w / 2 + setback + d / 2 + 2;
-          if (!pts[j][2] && R() < clamp(1.12 - edge * .58 + district * .4, .15, 1))
+          if (!pts[j][2] && R() < (use === 'industrial' ? .9 : clamp(1.12 - edge * .58 + district * .4, .15, 1)))
             addB(X - ty * side * offset, Y + tx * side * offset, f, d, angle + rnd([-.07, .07]), kind, .6, level);
           carry += f + gap + Math.max(0, district) * 5;
         }
@@ -1551,7 +1620,7 @@ async function buildWorld(settings, onStatus = () => {}) {
   for (const street of streets) { street.town = street.owner.id; delete street.owner; }
   for (const b of buildings) if (b.poi) { b.poiId = b.poi.id; delete b.poi; }
   const world = { ez, seed: seedStr, scenario, shape, mainland: !!mainland, terrainSettings, terrainBackend, terrainSeconds, roadScreeningBackend, sizeM, sc, n, k: Math.max(1, Math.round(2020 / n)), cell, h, ocean, lakeId, lakes, land, riv, acc, flow, rivers, riverW: widthOf, riverD: depthOf, riverT: T, hcache: {}, biome, moist, slope, shade, zone, region, stageT,
-    userSplines, pois, roads, corridors, corW: M(1500), hmin, hmax, slice, urban, buildings, streets, menuCam, reality, travel, rimL, chanM, carveD, floodM, roadBedM, resStats, deposits,
+    userSplines, shaping, pois, roads, corridors, corW: M(1500), hmin, hmax, slice, urban, buildings, streets, menuCam, reality, travel, rimL, chanM, carveD, floodM, roadBedM, resStats, deposits,
     res: Object.fromEntries(Object.entries(res).map(([k, a]) => { const o = new Uint8Array(N2); for (let i = 0; i < N2; i++) { const v = a[i]; o[i] = v <= 0 ? 0 : v >= 1 ? 255 : Math.round(v * 255); } return [k, o]; })),   // plain loop: Uint8Array.from with a callback took over a second here
     cstep: hmax > 1500 ? 50 : hmax > 600 ? 20 : 10,
     eco: { gw, eTer, eInf, eStage, eSeed },
@@ -1600,7 +1669,11 @@ async function generate() {
   if (!story && $('mode').value === 'ecology') $('mode').value = 'terrain';
   poiEdits.length = 0; $('undoPoi').disabled = true;
   S.metro = buildMetro(S);
-  for (const street of S.streets) street.grade = streetGrade(S, street.pts);
+  for (const street of S.streets) {
+    const grade = street.grade = streetGrade(S, street.pts), pts = street.pts;
+    // a street bridge runs level from bank to bank, not down into the channel
+    for (let j = 1; j < pts.length - 1; j++) if (pts[j][2]) { let e = j; while (e < pts.length - 1 && pts[e][2]) e++; const za = grade[j - 1], zb = grade[e]; for (let q = j; q < e; q++) grade[q] = Math.max(lerp(za, zb, (q - j + 1) / (e - j + 1)), grade[q]); j = e; }
+  }
   auditRoadAccess(S);
   stageTimes.push(['10/10 Rendering', (performance.now() - tail0) / 1000]); S.stageTimes = stageTimes; S.stageTimes.push(['Base terrain (inside stage 1)', terrainSeconds]);
   console.table(stageTimes.map(([stage, seconds]) => ({ stage, seconds: +seconds.toFixed(2) })));

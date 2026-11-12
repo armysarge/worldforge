@@ -66,7 +66,7 @@ function upsampleDetailCPU(world, N, ox, oy, quads, h, calm) {
 function carveWindow(world, H, N, ox, oy, quads) {
   const { n } = world, f = (n - 1) / quads, cellH = world.sizeM / quads;
   carveRivers(H, N, cellH, world.rivers, 1 / f, world.riverW, world.riverD,
-    I => world.rimL[Math.round((oy + (I / N | 0)) * f) * n + Math.round((ox + I % N) * f)], null, { ox, oy, quads, openEdge: world.mainland });
+    I => world.rimL[Math.round((oy + (I / N | 0)) * f) * n + Math.round((ox + I % N) * f)], null, { ox, oy, quads, openEdge: world.mainland, uncut: world.shaping ? a => (a >= 6 * world.riverT ? world.shaping.rivers : world.shaping.streams) === 'mark' : null });
   return H;
 }
 // export-resolution heightmap window (CPU). ox, oy, quads place the window inside a larger tiled export.
@@ -119,13 +119,94 @@ async function exportH(N, world = S) {
 }
 // nearest-sample a grid field to N×N (for masks at export size)
 function sampleGrid(N, fn) { const n = S.n, f = (n - 1) / (N - 1), o = new Float32Array(N * N); for (let Y = 0; Y < N; Y++) { const r = Math.round(Y * f) * n; for (let X = 0; X < N; X++) o[Y * N + X] = fn(r + Math.round(X * f)); } return o; }
-function grayPng(n, val, name) {
-  const c = document.createElement('canvas'); c.width = c.height = n; const x = c.getContext('2d'), img = x.createImageData(n, n);
-  for (let i = 0; i < n * n; i++) { img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = val(i); img.data[4 * i + 3] = 255; }
-  x.putImageData(img, 0, 0); return new Promise(r => c.toBlob(b => { save(b, name); r(); }));
+// ---------- grayscale PNG writer ----------
+// Writes 8-bit or 16-bit grayscale PNGs one batch of rows at a time through the browser's own deflate stream. Nothing the
+// size of the whole image is ever held as RGBA (a canvas needs four bytes per pixel twice over), which is what lets
+// 8129 x 8129 masks, layers and 16-bit heightmaps export on an ordinary machine.
+const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, v) => { for (let i = 0; i < 8; i++) v = v & 1 ? 0xedb88320 ^ (v >>> 1) : v >>> 1; return v; });
+function pngChunk(type, data) {
+  const out = new Uint8Array(12 + data.length), view = new DataView(out.buffer);
+  view.setUint32(0, data.length); for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i); out.set(data, 8);
+  let crc = 0xffffffff; for (let i = 4; i < 8 + data.length; i++) crc = CRC_TABLE[(crc ^ out[i]) & 255] ^ (crc >>> 8);
+  view.setUint32(8 + data.length, (crc ^ 0xffffffff) >>> 0);
+  return out;
 }
+// fillRow(y, row) writes one row of samples into row (Uint8Array for 8 bits, Uint16Array for 16 bits)
+async function encodeGrayPng(N, bits, fillRow) {
+  if (typeof CompressionStream === 'undefined') throw Error('This browser cannot write PNG files here (no CompressionStream). Use a current Chrome, Edge, Firefox or Safari.');
+  const head = new Uint8Array(13), hv = new DataView(head.buffer); hv.setUint32(0, N); hv.setUint32(4, N); head[8] = bits;      // colour type 0 = grayscale
+  const parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk('IHDR', head)];
+  const stream = new CompressionStream('deflate'), writer = stream.writable.getWriter();
+  const drained = (async () => { const reader = stream.readable.getReader(); for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(pngChunk('IDAT', value)); } })();
+  const rowBytes = 1 + N * bits / 8, batch = Math.max(1, Math.floor((1 << 22) / rowBytes)), row = bits === 8 ? new Uint8Array(N) : new Uint16Array(N);
+  for (let y = 0; y < N; y += batch) {
+    const rows = Math.min(batch, N - y), buf = new Uint8Array(rows * rowBytes);
+    for (let r = 0; r < rows; r++) {
+      const o = r * rowBytes + 1; fillRow(y + r, row);                    // each row starts with filter byte 0
+      if (bits === 8) buf.set(row, o); else for (let x = 0; x < N; x++) { buf[o + 2 * x] = row[x] >> 8; buf[o + 2 * x + 1] = row[x] & 255; }   // PNG is big-endian
+    }
+    await writer.write(buf);
+  }
+  await writer.close(); await drained;
+  parts.push(pngChunk('IEND', new Uint8Array(0)));
+  return new Blob(parts, { type: 'image/png' });
+}
+// Vector drawing at export size without an N x N canvas: draw(ctx) is replayed onto a strip a few hundred rows tall, moved
+// down the image as rows are asked for. row(y) returns that row's red channel (0..255). Rows must be read top to bottom.
+function bandedRaster(N, draw, bandRows = Math.max(64, Math.min(1024, Math.floor((1 << 25) / (4 * N))))) {
+  const c = document.createElement('canvas'); c.width = N; c.height = bandRows; const x = c.getContext('2d', { willReadFrequently: true });
+  let y0 = -1, data = null;
+  return y => {
+    if (y0 < 0 || y >= y0 + bandRows) {
+      y0 = Math.floor(y / bandRows) * bandRows;
+      x.setTransform(1, 0, 0, 1, 0, 0); x.fillStyle = '#000'; x.fillRect(0, 0, N, bandRows); x.setTransform(1, 0, 0, 1, 0, -y0); draw(x);
+      data = x.getImageData(0, 0, N, bandRows).data;
+    }
+    return { data, offset: (y - y0) * N * 4 };
+  };
+}
+async function grayPng(n, val, name) { save(await encodeGrayPng(n, 8, (y, row) => { for (let x = 0, i = y * n; x < n; x++, i++) row[x] = val(i); }), name); }
 $('xR16').onclick = async () => { if (!S) return; const N = expN(); save(new Blob([normH(await exportH(N))]), tag(N) + '.r16'); };   // uint16 little-endian, Unreal-ready
-$('xPng').onclick = async () => { if (!S) return; const N = expN(), v = normH(await exportH(N)); await grayPng(N, i => v[i] >> 8, tag(N) + '_height8.png'); };
+$('xPng').onclick = async () => { if (!S) return; const N = expN(), h = await exportH(N); await grayPng(N, i => norm(h[i]) >> 8, tag(N) + '_height8.png'); };
+// 16-bit grayscale PNG heightmap: the same samples as the .r16, in a format every terrain tool opens directly
+async function heightPng16(N, world = S) {
+  const h = await exportH(N, world), lo = world.hmin, k = 65535 / (world.hmax - world.hmin);
+  $('status').textContent = `Writing ${N}×${N} 16-bit PNG…`; await new Promise(r => setTimeout(r, 20));
+  return encodeGrayPng(N, 16, (y, row) => { for (let x = 0, i = y * N; x < N; x++, i++) row[x] = clamp(Math.round((h[i] - lo) * k), 0, 65535); });
+}
+$('xPng16').onclick = async () => {
+  if (!S) return; const N = expN();
+  try { save(await heightPng16(N), tag(N) + '_height16.png'); $('status').textContent = `16-bit PNG heightmap exported at ${N}×${N}`; }
+  catch (e) { $('status').textContent = 'Export error: ' + e.message; console.error(e); }
+};
+// Gaea: a 16-bit PNG at the power-of-two size Gaea works in (505 -> 512 ... 8129 -> 8192) plus a settings file with the
+// numbers its terrain definition needs. The map covers exactly the same ground; only the sample count differs.
+const gaeaSize = N => [512, 1024, 2048, 4096, 8192].reduce((a, b) => Math.abs(b - N) < Math.abs(a - N) ? b : a);
+function gaeaSettings(N, world = S) {
+  const range = world.hmax - world.hmin;
+  return {
+    tool: 'Gaea', file: `${tag(N)}_gaea_height16.png`, resolution: N, format: '16-bit grayscale PNG, row 0 = north, column 0 = west',
+    terrainWidthMeters: world.sizeM, terrainHeightMeters: +range.toFixed(2), heightMinMeters: +world.hmin.toFixed(2), heightMaxMeters: +world.hmax.toFixed(2),
+    seaLevelFraction: +(-world.hmin / range).toFixed(5), metersPerPixel: +(world.sizeM / (N - 1)).toFixed(4),
+    heightFormula: 'height in metres = heightMinMeters + pixel / 65535 * terrainHeightMeters',
+    steps: [
+      'Add a File node (Primitives) and load the PNG. Leave it as a height input, not a colour image.',
+      `Set the terrain definition (Terrain settings) to a width of ${world.sizeM} m and a height of ${+range.toFixed(2)} m, so slopes and erosion run at true scale.`,
+      `Work at ${N} x ${N}, or lower for previews. Sea level sits at ${(100 * -world.hmin / range).toFixed(2)}% of the height range: use that value for a Sea node or a water mask.`,
+      'The Worldforge PCG masks and layer weightmaps cover the same ground, so they can be loaded with further File nodes as masks.',
+      'To bring the Gaea result back to Unreal, build at the same size and keep the same width and height: every Worldforge coordinate, mask and spline still lines up as long as the terrain is not moved or rescaled.'
+    ],
+    seed: world.seed, shape: world.shape, source: 'Worldforge'
+  };
+}
+$('xGaea').onclick = async () => {
+  if (!S) return; const N = gaeaSize(expN());
+  try {
+    save(await heightPng16(N), `${tag(N)}_gaea_height16.png`);
+    setTimeout(() => save(new Blob([JSON.stringify(gaeaSettings(N), null, 2)], { type: 'application/json' }), `${tag(N)}_gaea.json`), 600);
+    $('status').textContent = `Gaea heightmap exported at ${N}×${N} with its settings file`;
+  } catch (e) { $('status').textContent = 'Export error: ' + e.message; console.error(e); }
+};
 function encodeHeightLE(heights, world) {
   const range = world.hmax - world.hmin, bytes = new DataView(new ArrayBuffer(heights.length * 2));
   for (let i = 0; i < heights.length; i++) {
@@ -155,8 +236,18 @@ async function exportEngineHeight(engine, emit = save) {
 $('xUnity').onclick = () => exportEngineHeight('unity').catch(e => { $('status').textContent = 'Export error: ' + e.message; console.error(e); });
 $('xGodot').onclick = () => exportEngineHeight('godot').catch(e => { $('status').textContent = 'Export error: ' + e.message; console.error(e); });
 const LAYER_NAMES = ['Sand', 'Grass', 'Farmland', 'Forest', 'Rock', 'Snow', 'Wetland', 'Urban'];
+// Layer rules (Layers panel). 'biome' (default) derives every layer from the biome map. 'rules' is the height-and-slope
+// stack terrain editors use: sand up to a height, bare rock from a slope (and optionally from a height), snow from a height,
+// each with a soft blend band; snow lies over rock, rock over the vegetation layers, sand under everything at the shore.
+// Empty fields mean automatic: sand to 6 m, rock from 32 degrees, no rock height, snow at the world's snow line.
+function layerRules(world) {
+  const get = id => { const e = $(id), v = e ? String(e.value ?? '').trim() : ''; return v === '' || !Number.isFinite(+v) ? null : +v; };
+  if (!$('lyMode') || $('lyMode').value !== 'rules') return null;
+  const ez = world.ez ?? Math.min(1, Math.pow(world.sizeM / 100000, .6)), snowAuto = (300 + 2000 * (world.terrainSettings?.snowLine ?? .8)) * ez;
+  return { sand: get('lySand') ?? 6, rockSlope: get('lyRockSlope') ?? 32, rockHeight: get('lyRockHeight'), snow: get('lySnow') ?? snowAuto, blend: Math.max(.5, get('lyBlend') ?? 15) };
+}
 function layerFields(world) {
-  const { n, land, biome, slope, moist, riv, urban } = world;
+  const { n, land, biome, slope, moist, riv, urban, h } = world, rules = layerRules(world);
   const fields = LAYER_NAMES.map(() => new Uint8Array(n * n)), weights = new Float32Array(fields.length);
   for (let i = 0; i < n * n; i++) {
     if (!land[i]) continue;
@@ -169,6 +260,18 @@ function layerFields(world) {
     weights[5] = b === 6 ? 1.4 * (1 - steep * .72) : 0;
     weights[6] = (b === 7 ? 1 : river ? .55 : sstep(.68, .95, wet) * .26) * (1 - steep);
     weights[7] = urban[i] ? (urban[i] === 2 ? 3.7 : 2.4) * (1 - steep) : 0;
+    if (rules) {
+      const z = h[i], bl = rules.blend, soft = bl / 3;                        // blend band: bl metres of height, a third of that in degrees of slope
+      const sand = 1 - sstep(rules.sand - bl * .3, rules.sand + bl * .3, z);
+      const rock = Math.max(sstep(rules.rockSlope - soft, rules.rockSlope + soft, angle), rules.rockHeight == null ? 0 : sstep(rules.rockHeight - bl, rules.rockHeight + bl, z));
+      const snow = sstep(rules.snow - bl, rules.snow + bl, z) * (1 - sstep(42, 58, angle));     // snow does not hold on the steepest faces
+      let veg = 0; for (const j of [1, 2, 3, 6]) veg += weights[j];
+      const ground = (1 - rock) * (1 - snow) * (1 - sand), k = veg > 0 ? ground / veg : 0;
+      for (const j of [1, 2, 3, 6]) weights[j] *= k;
+      if (!(veg > 0)) weights[1] = ground;                                    // nothing growing there: grass takes the share
+      weights[0] = sand * (1 - rock) * (1 - snow); weights[4] = rock * (1 - snow); weights[5] = snow;
+      if (weights[7] > 0) { const u = Math.min(.85, weights[7] / 3.7); for (let j = 0; j < 7; j++) weights[j] *= 1 - u; weights[7] = u; }   // built-up ground keeps its share
+    }
     let total = 0;
     for (const w of weights) total += w;
     let cumulative = 0, previous = 0;
@@ -182,24 +285,17 @@ function layerFields(world) {
 }
 async function exportLayers(N, world, emit) {
   const { n, land } = world, f = (n - 1) / (N - 1), fields = layerFields(world);
-  const c = document.createElement('canvas'); c.width = c.height = N;
-  const ctx = c.getContext('2d'), img = ctx.createImageData(N, N), d = img.data;
   for (const [j, field] of fields.entries()) {
     const name = LAYER_NAMES[j]; $('status').textContent = 'Exporting layer ' + name + '…'; await new Promise(resolve => setTimeout(resolve, 20));
-    for (let Y = 0; Y < N; Y++) {
+    emit(await encodeGrayPng(N, 8, (Y, row) => {
       const gy = Y * f, y = Math.min(n - 2, Math.floor(gy)), ty = sstep(0, 1, gy - y);
       for (let X = 0; X < N; X++) {
         const gx = X * f, x = Math.min(n - 2, Math.floor(gx)), tx = sstep(0, 1, gx - x), i = y * n + x;
         const area = lerp(lerp(land[i], land[i + 1], tx), lerp(land[i + n], land[i + n + 1], tx), ty);
         const weight = lerp(lerp(field[i], field[i + 1], tx), lerp(field[i + n], field[i + n + 1], tx), ty);
-        const v = area ? Math.round(weight / area) : 0, o = 4 * (Y * N + X);
-        d[o] = d[o + 1] = d[o + 2] = v; d[o + 3] = 255;
+        row[X] = area ? Math.round(weight / area) : 0;
       }
-    }
-    ctx.putImageData(img, 0, 0);
-    const blob = await new Promise(resolve => c.toBlob(resolve));
-    if (!blob) throw Error('PNG encoding failed at this export size.');
-    emit(blob, name);
+    }), name);
   }
 }
 $('xLayers').onclick = async () => {
@@ -208,11 +304,15 @@ $('xLayers').onclick = async () => {
   await exportLayers(N, S, (blob, layer) => save(blob, name + '_layer_' + layer + '.png'));
   $('status').textContent = 'Layers exported';
 };
-$('xWater').onclick = () => {
-  if (!S) return; const N = expN(), m = sampleGrid(N, i => S.lakeId[i] || S.ocean[i] ? 1 : 0), c = document.createElement('canvas'); c.width = c.height = N;
-  const x = c.getContext('2d'), img = x.createImageData(N, N);
-  for (let i = 0; i < N * N; i++) { img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = m[i] * 255; img.data[4 * i + 3] = 255; }
-  x.putImageData(img, 0, 0); drawRivers(x, (N - 1) / (S.n - 1), '#fff', 1); c.toBlob(b => save(b, tag(N) + '_water.png'));
+$('xWater').onclick = async () => {
+  if (!S) return; const N = expN(), { n, lakeId, ocean } = S, f = (n - 1) / (N - 1);
+  $('status').textContent = 'Water mask…'; await new Promise(r => setTimeout(r, 20));
+  const rivers = bandedRaster(N, x => drawRivers(x, (N - 1) / (n - 1), '#fff', 1));
+  save(await encodeGrayPng(N, 8, (Y, row) => {
+    const { data, offset } = rivers(Y), g = Math.round(Y * f) * n;
+    for (let X = 0; X < N; X++) { const gi = g + Math.round(X * f); row[X] = lakeId[gi] || ocean[gi] ? 255 : data[offset + 4 * X]; }
+  }), tag(N) + '_water.png');
+  $('status').textContent = 'Water mask exported';
 };
 $('xSlice').onclick = async () => {   // vertical-slice crop at the export size, same height range as the full map
   if (!S || !S.slice) return; const N = expN(), h = await exportH(N), cell = S.sizeM / (N - 1), sf = (N - 1) / (S.n - 1), half = Math.round(S.slice.size / 2 / cell), s = 2 * half + 1;
@@ -280,16 +380,18 @@ $('xCsv').onclick = () => { if (!S) return; save(new Blob([poiCsv()], { type: 't
 async function exportMasks() {
   const N = expN(), { n, biome, slope, moist, acc, lakeId, ocean, stageT, cell } = S, f = (n - 1) / (N - 1), k = 1 / f, cellE = S.sizeM / (N - 1), r = Math.max(1, Math.round(k));
   $('status').textContent = 'PCG masks: exclusion…'; await new Promise(res => setTimeout(res, 20));
-  // exclusion: water + roads + rivers + building footprints, drawn as vectors at export size
-  const c = document.createElement('canvas'); c.width = c.height = N; const x = c.getContext('2d');
-  x.fillStyle = '#000'; x.fillRect(0, 0, N, N); x.lineCap = x.lineJoin = 'round'; x.strokeStyle = x.fillStyle = '#fff';
-  for (const [type, wm] of [['highway', 16], ['road', 11], ['trail', 4]]) { x.lineWidth = Math.max(1, wm / cellE); for (const rd of S.roads) if (rd.type === type) strokePts(x, rd.pts, k); }
-  drawRivers(x, k, '#fff', 1);
-  for (const st of S.streets) { x.lineWidth = Math.max(1, (st.w + 2) / cellE); x.beginPath(); st.pts.forEach(([px, py], j) => j ? x.lineTo((px / cell + .5) * k, (py / cell + .5) * k) : x.moveTo((px / cell + .5) * k, (py / cell + .5) * k)); x.stroke(); }
-  for (const b of S.buildings) { x.save(); x.translate((b.x / cell + .5) * k, (b.y / cell + .5) * k); x.rotate(b.a); x.fillRect(-(b.w + 4) / 2 / cellE, -(b.d + 4) / 2 / cellE, (b.w + 4) / cellE, (b.d + 4) / cellE); x.restore(); }
-  const img = x.getImageData(0, 0, N, N), d = img.data, E = new Uint8Array(N * N);
-  for (let Y = 0; Y < N; Y++) { const row = Math.round(Y * f) * n; for (let X = 0; X < N; X++) { const o = Y * N + X, gi = row + Math.round(X * f); E[o] = ocean[gi] || lakeId[gi] ? 255 : d[4 * o]; } }
-  const m = new Float32Array(N * N), t = new Float32Array(N * N), o = new Float32Array(N * N);
+  // exclusion: water + roads + rivers + building footprints, drawn as vectors at export size (in strips, see bandedRaster)
+  const drawExclusion = x => {
+    x.lineCap = x.lineJoin = 'round'; x.strokeStyle = x.fillStyle = '#fff';
+    for (const [type, wm] of [['highway', 16], ['road', 11], ['trail', 4]]) { x.lineWidth = Math.max(1, wm / cellE); for (const rd of S.roads) if (rd.type === type) strokePts(x, rd.pts, k); }
+    drawRivers(x, k, '#fff', 1);
+    for (const st of S.streets) { x.lineWidth = Math.max(1, (st.w + 2) / cellE); x.beginPath(); st.pts.forEach(([px, py], j) => j ? x.lineTo((px / cell + .5) * k, (py / cell + .5) * k) : x.moveTo((px / cell + .5) * k, (py / cell + .5) * k)); x.stroke(); }
+    for (const b of S.buildings) { x.save(); x.translate((b.x / cell + .5) * k, (b.y / cell + .5) * k); x.rotate(b.a); x.fillRect(-(b.w + 4) / 2 / cellE, -(b.d + 4) / 2 / cellE, (b.w + 4) / cellE, (b.d + 4) / cellE); x.restore(); }
+  };
+  const E = new Uint8Array(N * N);                              // one byte per sample: the only export-size array the masks keep
+  { const strip = bandedRaster(N, drawExclusion);
+    for (let Y = 0; Y < N; Y++) { const { data, offset } = strip(Y), row = Math.round(Y * f) * n; for (let X = 0; X < N; X++) { const gi = row + Math.round(X * f); E[Y * N + X] = ocean[gi] || lakeId[gi] ? 255 : data[offset + 4 * X]; } } }
+  const g = new Float32Array(n * n), gt = new Float32Array(n * n), gb = new Float32Array(n * n);   // a mask on the generation grid, and its blur
   const aT = S.riverT / 8, wet = i => Math.max(biome[i] === 7 || biome[i] === 8 || !S.land[i] ? 1 : 0, clamp(Math.log2(1 + acc[i] / aT) / 10, 0, 1));
   // scree: loose rock on moderate slopes just below a cliff, computed once on the generation grid
   const scree = new Float32Array(n * n), R3 = 3;
@@ -325,14 +427,25 @@ async function exportMasks() {
     ['Regions', i => S.region[i] / 6, 0],     // indexed: round(v/255*6) → region id (discovery / "explore all regions")
     ['Zones', i => S.zone[i] / 3, 0]          // indexed: round(v/255*3) → 1 early, 2 mid, 3 late
   ];
+  // Each mask is worked out and softened on the generation grid, then interpolated up to export size row by row as the PNG
+  // is written (indexed masks such as Regions and Zones are point-sampled so their ids stay exact). Scatter masks are cut
+  // by the full-resolution exclusion, so roads, rivers and buildings stay sharp.
   for (const [name, fn, br, clearOut] of MASKS) {
     $('status').textContent = `PCG masks: ${name}…`; await new Promise(res => setTimeout(res, 20));
-    if (fn) for (let Y = 0; Y < N; Y++) { const row = Math.round(Y * f) * n; for (let X = 0; X < N; X++) m[Y * N + X] = fn(row + Math.round(X * f)); }
-    else for (let i = 0; i < N * N; i++) m[i] = E[i] / 255;
-    blur(m, N, br, t, o);
     const keepOut = clearOut || name === 'TreeDensity' || name === 'Grass' || name === 'Rocks' || name === 'Scree';      // scatter masks already respect the exclusion
-    for (let i = 0; i < N * N; i++) { const v = (keepOut ? o[i] * (1 - E[i] / 255) : o[i]) * 255; d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = v; d[4 * i + 3] = 255; }
-    x.putImageData(img, 0, 0); await new Promise(res => c.toBlob(b => { save(b, `${tag(N)}_pcg_${name}.png`); res(); }));
+    let src = null;
+    if (fn) { for (let i = 0; i < n * n; i++) g[i] = fn(i); src = br ? blur(g, n, 1, gt, gb) : g; }
+    const blob = await encodeGrayPng(N, 8, (Y, row) => {
+      if (!fn) { row.set(E.subarray(Y * N, Y * N + N)); return; }
+      const gy = Y * f, y = Math.min(n - 2, Math.floor(gy)), ty = gy - y, o = Y * N;
+      for (let X = 0; X < N; X++) {
+        const gx = X * f; let v;
+        if (br) { const x = Math.min(n - 2, Math.floor(gx)), tx = gx - x, i = y * n + x; v = lerp(lerp(src[i], src[i + 1], tx), lerp(src[i + n], src[i + n + 1], tx), ty); }
+        else v = src[Math.round(gy) * n + Math.round(gx)];
+        row[X] = clamp((keepOut ? v * (1 - E[o + X] / 255) : v) * 255, 0, 255);
+      }
+    });
+    save(blob, `${tag(N)}_pcg_${name}.png`);
   }
   $('status').textContent = 'PCG masks exported';
 }
@@ -401,7 +514,8 @@ function ueScript() {
       ...S.metro.map(s => ['metro', s.from + ' - ' + s.to, s.points.map(([x, y, z]) => ueP(x, y, z))])],
     rivers: S.rivers.filter(p => p.some(q => q[2] >= T6)).map(p => {
       const pts = thin(p.filter(q => q[2] >= T6), Math.max(2 * S.cell, 30));
-      return pts.length < 2 ? null : [Math.round(S.riverW(pts[0][2][2])), Math.round(S.riverW(pts[pts.length - 1][2][2])), pts.map(([xm, ym, q]) => ueP(xm, ym, q[3] + S.riverD(q[2]) * .8))];
+      // a carved river's spline runs at its water surface inside the channel; a marked-only river lies on the ground
+      return pts.length < 2 ? null : [Math.round(S.riverW(pts[0][2][2])), Math.round(S.riverW(pts[pts.length - 1][2][2])), pts.map(([xm, ym, q]) => S.shaping && S.shaping.rivers === 'mark' ? ueP(xm, ym) : ueP(xm, ym, q[3] + S.riverD(q[2]) * .8))];
     }).filter(Boolean),
     lakes: S.lakes.map(l => [l.name, ...ueP(l.x * S.cell, l.y * S.cell, l.level), +l.area.toFixed(3), !!l.reservoir]),
     // outlines as closed splines: coastline, lake shores and land-cover zones (drive PCG, landscape layers or biome tools)
@@ -741,8 +855,8 @@ function worldData() {
     areasFormat: 'outlines in metres from the north-west corner; closed = a loop, open = runs off the map edge', areas: worldAreas().map(o => ({ kind: o.kind, name: o.name, closed: o.closed, pts: o.pts.map(([x, y]) => [Math.round(x), Math.round(y)]) })),
     alienCorridors: S.corridors.map(c => ({ from: c.from, widthM: Math.round(S.corW), pts: c.pts.map(([x, y]) => m(x, y)) })),
     noRoadAccess: S.stats.unreachable, roadAccessReview: S.roadAccessReview, metro: S.metro,
-    settlements: S.pois.filter(p => p.radius).map(p => ({ id: p.id, name: p.name, type: p.type, layout: p.layout, center: m(p.x, p.y), radiusM: Math.round(p.radius), axisAngle: +p.angle.toFixed(3), blockM: p.block })),
-    streets: S.streets.map(s => ({ settlement: s.town, widthM: s.w, main: s.main, pts: s.pts.map(([x, y]) => [Math.round(x), Math.round(y)]), gradeM: s.grade })),
+    settlements: S.pois.filter(p => p.radius).map(p => ({ id: p.id, name: p.name, type: p.type, layout: p.layout, center: m(p.x, p.y), radiusM: Math.round(p.radius), axisAngle: +p.angle.toFixed(3), blockM: p.block, ...(p.square ? { square: p.square } : {}) })),
+    streets: S.streets.map(s => ({ settlement: s.town, widthM: s.w, main: s.main, ...(s.use ? { use: s.use } : {}), ...(s.pts.some(q => q[2]) ? { bridge: true } : {}), pts: s.pts.map(([x, y]) => [Math.round(x), Math.round(y)]), gradeM: s.grade })),
     buildingsFormat: '[x, y, width, depth, angleRad, kind, foundationElevationM, poiId] in metres', buildings: S.buildings.map(b => [Math.round(b.x), Math.round(b.y), Math.round(b.w), Math.round(b.d), +b.a.toFixed(3), b.kind, b.z, b.poiId || null])
   };
 }

@@ -2,7 +2,7 @@
 
 // ---------- saved worlds and shareable links ----------
 // Every setting that changes the generated world. The same values reproduce the same map (CPU compute is deterministic; WebGPU may differ slightly).
-const SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms', 'hydraulic', 'pois', 'splines'];
+const SETTING_IDS = ['seed', 'scenario', 'fp', 'shape', 'size', 'compute', 'mtn', 'lakes', 'riv', 'elevation', 'erosion', 'snowLine', 'terrainScale', 'landforms', 'hydraulic', 'pois', 'splines', 'shRivers', 'shStreams', 'shLakes', 'shRoads', 'shBuildings', 'lyMode', 'lySand', 'lyRockSlope', 'lyRockHeight', 'lySnow', 'lyBlend'];
 const settingsSnapshot = () => Object.fromEntries(SETTING_IDS.map(id => [id, String($(id).value)]));
 function applySettings(settings) {
   for (const id of SETTING_IDS) if (settings[id] != null && $(id)) $(id).value = settings[id];
@@ -47,6 +47,22 @@ if (typeof $ === 'function') {
   $('deleteSaved').onclick = () => {
     const list = readSaved(), i = +$('savedList').value; if (!list[i]) return;
     const [gone] = list.splice(i, 1); writeSaved(list); refreshSaved(i); $('status').textContent = 'Removed ' + savedLabel(gone);
+  };
+  // project files: the same settings as a saved world, as a small file to keep, back up or send to someone
+  $('saveProject').onclick = () => {
+    const settings = settingsSnapshot(), name = $('saveName').value.trim() || `${settings.seed} ${settings.shape}`;
+    const blob = new Blob([JSON.stringify({ app: 'Worldforge', version: 1, name, savedAt: new Date().toISOString(), settings }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name.replace(/[^\w.-]+/g, '_') + '.worldforge.json'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    $('status').textContent = 'Project file saved: ' + a.download;
+  };
+  $('openProject').onclick = () => $('projectFile').click();
+  $('projectFile').onchange = async () => {
+    const file = $('projectFile').files[0]; $('projectFile').value = ''; if (!file) return;
+    try {
+      const project = JSON.parse(await file.text()), settings = project && project.settings;
+      if (!settings || typeof settings !== 'object' || settings.seed == null) throw Error('this is not a Worldforge project file');
+      applySettings(settings); $('gen').click();
+    } catch (e) { $('status').textContent = 'Could not open the project: ' + e.message; }
   };
   $('shareLink').onclick = async () => {
     const url = (typeof location !== 'undefined' ? location.href.split('#')[0] : '') + settingsToHash();

@@ -118,7 +118,8 @@ $('gen').onclick = async () => {
   finally { $('gen').disabled = $('rnd').disabled = false; $('cancelGen').hidden = true; }
 };
 $('cancelGen').onclick = cancelGeneration;
-$('rnd').onclick = () => { $('seed').value = Math.random().toString(36).slice(2, 8); $('gen').click(); };
+const randomSeed = () => Math.random().toString(36).slice(2, 8);
+$('rnd').onclick = () => { $('seed').value = randomSeed(); $('gen').click(); };
 for (const id of ['mode', 'oHyd', 'oRoad', 'oPoi', 'oLab', 'oLab2', 'oBld', 'oCont', 'oSlice', 'oCor', 'oGrid', 'oMetro']) $(id).onchange = render;
 $('editPoi').onchange = updateMapControls;
 const LEGEND = [
@@ -241,9 +242,22 @@ async function upgradeMaterialControls() {
   }
 }
 
+// The example project: a 16 km crescent island on the quick 505 grid, so the app opens on a finished world in a couple of seconds.
+// Its seed is replaced with a random one when it is opened (the seed here is only the fallback).
+const EXAMPLE_PROJECT = { name: 'Example: Harbor Fog island', settings: { seed: 'harbor-fog', scenario: 'sandbox', fp: '16', shape: 'crescent', size: '505', compute: 'auto', mtn: '1', lakes: '5', riv: '1',
+  elevation: '.5', erosion: '.2', snowLine: '.8', terrainScale: '.01', landforms: 'on', hydraulic: 'off', pois: 'full', splines: '' } };
+let startNote = null;
 function startApp() {
   setZoom(1);
-  if (typeof location !== 'undefined') applySettings(settingsFromHash(location.hash));   // a shared link carries its own settings
+  // What opens: the world in the address (a share link, or the last world of this tab), else the most recently saved
+  // world, else the built-in example project. Nothing random is generated on opening.
+  const linked = typeof location !== 'undefined' ? settingsFromHash(location.hash) : {}, saved = readSaved();
+  if (Object.keys(linked).length) { applySettings(linked); startNote = 'Opened the world from the link'; }
+  else if (saved.length) { const latest = saved.reduce((a, b) => (b.savedAt || 0) >= (a.savedAt || 0) ? b : a); applySettings(latest.settings); startNote = 'Opened your latest saved world: ' + savedLabel(latest); }
+  else {                                                   // the example project, on a fresh random seed each time
+    const seed = randomSeed(); applySettings({ ...EXAMPLE_PROJECT.settings, seed });
+    startNote = `Opened the example project on a random seed (${seed}). Change anything and press Generate terrain, or pick a Preset`;
+  }
   refreshSaved();
   $('gen').click();
   upgradeMaterialControls();
@@ -255,20 +269,25 @@ function startApp() {
 // settings: saved worlds and share links carry them, and the generator (buildWorld) reads them like any other setting.
 const SPL = { sel: -1, drawing: null, dragPt: null, text: null, list: [] };
 const SPL_COL = { ridge: '#f59e0b', valley: '#c084fc', river: '#22d3ee', road: '#f8fafc' };
+// painted biomes are brush strokes stored the same way: t 'biome', b = biome id, w = brush width
+const PAINT_NAME = { 1: 'Beach', 2: 'Plains', 3: 'Forest', 4: 'Highland', 5: 'Alpine rock', 6: 'Snow', 7: 'Wetland', 9: 'Farmland' };
+const splineColor = q => q.t === 'biome' ? `rgb(${BIOME_COL[q.b].join(',')})` : SPL_COL[q.t] || '#fff';
+const spTypeGet = () => { const [t, b] = $('spType').value.split(':'); return b ? { t, b: +b } : { t }; };
 function splineList() {                       // parsed from the field, so links and saved worlds that set it are picked up
   const text = $('splines').value || '';
   if (text !== SPL.text) { SPL.text = text; try { const v = JSON.parse(text || '[]'); SPL.list = Array.isArray(v) ? v : []; } catch { SPL.list = []; } SPL.sel = Math.min(SPL.sel, SPL.list.length - 1); }
   return SPL.list;
 }
-function saveSplines() { SPL.text = $('splines').value = SPL.list.length ? JSON.stringify(SPL.list.map(q => ({ t: q.t, p: q.p.map(([u, v]) => [+u.toFixed(4), +v.toFixed(4)]), w: q.w, a: q.a }))) : ''; splineInfo(); scheduleOverlay(); }
+function saveSplines() { SPL.text = $('splines').value = SPL.list.length ? JSON.stringify(SPL.list.map(q => ({ t: q.t, ...(q.t === 'biome' ? { b: q.b } : {}), p: q.p.map(([u, v]) => [+u.toFixed(4), +v.toFixed(4)]), w: q.w, a: q.a }))) : ''; splineInfo(); scheduleOverlay(); }
 function splineLabel(q) {
   const a = q.a, km = S ? S.sizeM / 1000 : +$('fp').value, ez = Math.min(1, Math.pow(km / 100, .6)), m = Math.round(a * 100 * ez);
+  if (q.t === 'biome') return `${PAINT_NAME[q.b] || 'Biome'} painted with a ${q.w} m brush`;
   return q.t === 'ridge' ? `Ridge, about ${m} m high and ${q.w} m wide` : q.t === 'valley' ? `Valley, about ${m} m deep and ${q.w} m wide`
     : q.t === 'river' ? `${a <= 3 ? 'Stream' : a <= 7 ? 'River' : 'Major river'} in a ${q.w} m wide valley` : a <= 3 ? 'Dirt track' : a <= 7 ? 'Gravel road' : 'Highway';
 }
 function splineInfo() {
   const list = splineList(), cur = SPL.drawing || list[SPL.sel];
-  const what = cur ? splineLabel(cur) : splineLabel({ t: $('spType').value, w: +$('spWidth').value, a: +$('spAmount').value });
+  const what = cur ? splineLabel(cur) : splineLabel({ ...spTypeGet(), w: +$('spWidth').value, a: +$('spAmount').value });
   $('spInfo').textContent = (SPL.drawing ? `Drawing: ${what} (${SPL.drawing.p.length} points). Double-click or Enter to finish.` : cur ? `Selected: ${what}.` : `Next line: ${what}.`) + ` ${list.length} line${list.length === 1 ? '' : 's'} drawn.`;
   // a drawn road that had to go a long way round: say so, the sketch crosses ground too steep for that class of road
   const detours = S ? S.roads.filter(r => r.user && r.len > 2.5 * r.sketchM + 500) : [];
@@ -280,10 +299,10 @@ function drawUserSplines(ctx) {               // on the overlay, in base-canvas 
   if (!S || V3.on) return; const W = S.n * S.k, px = 1 / (ovQ || 1), list = splineList();
   const all = SPL.drawing ? [...list, SPL.drawing] : list;
   all.forEach((q, j) => {
-    if (!q.p.length) return; const sel = q === SPL.drawing || j === SPL.sel, col = SPL_COL[q.t] || '#fff';
+    if (!q.p.length) return; const sel = q === SPL.drawing || j === SPL.sel, col = splineColor(q), paint = q.t === 'biome';
     const path = () => { ctx.beginPath(); q.p.forEach(([u, v], k) => k ? ctx.lineTo(u * W, v * W) : ctx.moveTo(u * W, v * W)); };
     ctx.lineJoin = ctx.lineCap = 'round';
-    if (q.t !== 'road') { ctx.globalAlpha = sel ? .28 : .16; ctx.strokeStyle = col; ctx.lineWidth = Math.max(4 * px, q.w / S.sizeM * W); path(); ctx.stroke(); }   // the band it affects
+    if (q.t !== 'road') { ctx.globalAlpha = paint ? (sel ? .75 : .6) : sel ? .28 : .16; ctx.strokeStyle = col; ctx.lineWidth = Math.max(4 * px, q.w / S.sizeM * W); path(); ctx.stroke(); }   // the band it affects
     ctx.globalAlpha = 1; ctx.strokeStyle = '#0b0e12'; ctx.lineWidth = (sel ? 6 : 5) * px; path(); ctx.stroke();
     ctx.strokeStyle = col; ctx.lineWidth = (sel ? 3.5 : 2.5) * px; ctx.setLineDash(q.t === 'road' ? [8 * px, 5 * px] : []); path(); ctx.stroke(); ctx.setLineDash([]);
     if (sel) for (const [u, v] of q.p) { ctx.beginPath(); ctx.arc(u * W, v * W, 5 * px, 0, 6.2832); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 1.5 * px; ctx.strokeStyle = '#0b0e12'; ctx.stroke(); }
@@ -322,18 +341,18 @@ addEventListener('keydown', e => {
   e.preventDefault();
 });
 function splineSync() {                        // show the selected line's settings in the controls
-  const q = splineList()[SPL.sel]; if (q) { $('spType').value = q.t; $('spWidth').value = q.w; $('spAmount').value = q.a; }
+  const q = splineList()[SPL.sel]; if (q) { $('spType').value = q.t === 'biome' ? 'biome:' + q.b : q.t; $('spWidth').value = q.w; $('spAmount').value = q.a; }
   splineInfo(); scheduleOverlay();
 }
 $('spDraw').onclick = () => {
   if (SPL.drawing) return finishSpline();
   if (!S) return; if (V3.on) toggle3D();
-  SPL.sel = -1; SPL.drawing = { t: $('spType').value, p: [], w: +$('spWidth').value, a: +$('spAmount').value }; splineInfo();
+  SPL.sel = -1; SPL.drawing = { ...spTypeGet(), p: [], w: +$('spWidth').value, a: +$('spAmount').value }; splineInfo();
   $('status').textContent = 'Click on the map to add points. Double-click or Enter finishes the line, Esc cancels, Backspace removes the last point.';
 };
 for (const id of ['spType', 'spWidth', 'spAmount']) $(id).addEventListener('input', () => {       // the controls edit the line in hand, or set up the next one
   const q = SPL.drawing || splineList()[SPL.sel];
-  if (q) { q.t = $('spType').value; q.w = +$('spWidth').value; q.a = +$('spAmount').value; if (!SPL.drawing) saveSplines(); }
+  if (q) { delete q.b; Object.assign(q, spTypeGet()); q.w = +$('spWidth').value; q.a = +$('spAmount').value; if (!SPL.drawing) saveSplines(); }
   splineInfo(); scheduleOverlay();
 });
 $('spType').addEventListener('change', () => $('spType').dispatchEvent(new Event('input')));
@@ -346,6 +365,12 @@ $('spClear').onclick = () => { SPL.drawing = null; splineList().length = 0; SPL.
 $('spApply').onclick = () => { finishSpline(); $('gen').click(); };
 splineInfo();
 
+// ---------- material layer rules ----------
+// The rule fields are read by layerFields() in exports.js; here they only need to redraw the map when it shows the layers.
+for (const id of ['lyMode', 'lySand', 'lyRockSlope', 'lyRockHeight', 'lySnow', 'lyBlend']) if ($(id)) $(id).addEventListener('input', () => { if (S && $('mode').value === 'materials') render(); });
+if ($('lyMode')) $('lyMode').addEventListener('change', () => { if (S && $('mode').value === 'materials') render(); });
+if ($('lyPreview')) $('lyPreview').onclick = () => { if (!S) return; $('mode').value = 'materials'; render(); };
+
 // ---------- presets ----------
 // Starting points in the spirit of the template pickers in terrain tools: each one is just a set of the ordinary controls.
 const PRESETS = {
@@ -357,7 +382,7 @@ const PRESETS = {
   plateau: { shape: 'plateaus', mtn: '1', lakes: '0', riv: '.2', elevation: '.6', erosion: '.1', snowLine: '1', terrainScale: '.01', hydraulic: 'off', landforms: 'off', pois: 'few' },
   cliffs: { shape: 'coastal', mtn: '1.1', lakes: '2', riv: '.7', elevation: '.6', erosion: '.2', snowLine: '.9', terrainScale: '.011', hydraulic: 'light', landforms: 'on', pois: 'full' }
 };
-if (typeof MutationObserver !== 'undefined' && $('status').nodeType === 1) new MutationObserver(() => { if (/^Done/.test($('status').textContent)) splineInfo(); }).observe($('status'), { childList: true, characterData: true, subtree: true });
+if (typeof MutationObserver !== 'undefined' && $('status').nodeType === 1) new MutationObserver(() => { if (/^Done/.test($('status').textContent)) { splineInfo(); if (startNote) { const note = startNote; startNote = null; $('status').textContent += ' · ' + note; } } }).observe($('status'), { childList: true, characterData: true, subtree: true });
 if ($('preset')) $('preset').onchange = () => { const p = PRESETS[$('preset').value]; if (!p) return; applySettings(p); $('gen').click(); };
 
 // ---------- progress bars ----------
